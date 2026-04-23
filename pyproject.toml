@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "session-rag-retrieval"
+version = "0.1.0"
+description = "Session-scoped retrieval pipeline for sustainability-report RAG systems."
+requires-python = ">=3.10"
+authors = [{ name = "Codex" }]
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pymupdf>=1.24"]
+spreadsheet = ["openpyxl>=3.1", "pandas>=2.2"]
+embeddings = ["sentence-transformers>=3.0"]
+vector-db = ["qdrant-client>=1.10", "fastembed>=0.3"]
+ocr = ["pytesseract>=0.3", "pillow>=10"]
+generation = ["openai>=2.0", "matplotlib>=3.8", "reportlab>=4.0", "pillow>=10"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["rag_retrieval*"]
