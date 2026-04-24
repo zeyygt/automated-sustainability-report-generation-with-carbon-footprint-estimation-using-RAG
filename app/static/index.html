@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>SustainChat | Sustainability AI Portal</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "on-surface": "#1b1c1e", "surface-tint": "#49607c", "on-surface-variant": "#43474d",
+          "background": "#faf9fb", "surface-container": "#efedf0", "surface-container-high": "#e9e8ea",
+          "on-error": "#ffffff", "surface-dim": "#dbd9dc", "on-secondary-container": "#285c80",
+          "on-primary": "#ffffff", "tertiary-container": "#3b2400", "inverse-primary": "#b0c9e8",
+          "surface-container-highest": "#e3e2e4", "primary": "#00152a", "on-primary-fixed-variant": "#314863",
+          "error": "#ba1a1a", "surface-container-low": "#f4f3f5", "on-secondary-fixed": "#001e30",
+          "outline-variant": "#c3c6ce", "on-primary-container": "#7a92b0", "inverse-on-surface": "#f2f0f3",
+          "outline": "#74777e", "on-secondary": "#ffffff", "surface": "#faf9fb",
+          "primary-fixed": "#d1e4ff", "on-background": "#1b1c1e", "on-tertiary-container": "#ad8a5a",
+          "surface-container-lowest": "#ffffff", "on-primary-fixed": "#011d35",
+          "on-secondary-fixed-variant": "#114b6d", "surface-bright": "#faf9fb",
+          "on-tertiary": "#ffffff", "error-container": "#ffdad6", "secondary-fixed": "#cbe6ff",
+          "surface-variant": "#e3e2e4", "inverse-surface": "#2f3032", "primary-fixed-dim": "#b0c9e8",
+          "primary-container": "#102a43", "on-error-container": "#93000a",
+          "secondary-container": "#a4d4fd", "secondary": "#306386"
+        },
+        borderRadius: { DEFAULT: "0.125rem", lg: "0.25rem", xl: "0.5rem", full: "0.75rem" },
+        spacing: { unit: "4px", xs: "4px", lg: "24px", gutter: "20px", xl: "40px", md: "16px", sm: "8px", "sidebar-width": "280px" },
+        fontFamily: { h1: ["Public Sans"], code: ["monospace"], "body-md": ["Public Sans"], "body-lg": ["Public Sans"], "label-caps": ["Public Sans"], "body-sm": ["Public Sans"], h3: ["Public Sans"], h2: ["Public Sans"] },
+        fontSize: {
+          h1: ["30px", { lineHeight: "36px", letterSpacing: "-0.02em", fontWeight: "700" }],
+          code: ["14px", { lineHeight: "20px", fontWeight: "400" }],
+          "body-md": ["16px", { lineHeight: "24px", fontWeight: "400" }],
+          "body-lg": ["18px", { lineHeight: "28px", fontWeight: "400" }],
+          "label-caps": ["12px", { lineHeight: "16px", letterSpacing: "0.05em", fontWeight: "700" }],
+          "body-sm": ["14px", { lineHeight: "20px", fontWeight: "400" }],
+          h3: ["20px", { lineHeight: "28px", fontWeight: "600" }],
+          h2: ["24px", { lineHeight: "32px", letterSpacing: "-0.01em", fontWeight: "600" }]
+        }
+      }
+    }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  body { font-family: 'Public Sans', sans-serif; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  .prose h2 { color: #22577a; font-size: 1.1rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+  .prose h3 { color: #334e68; font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.4rem; }
+  .prose p { margin: 0.4rem 0; line-height: 1.6; }
+  .prose ul { list-style: disc; padding-left: 1.25rem; margin: 0.4rem 0; }
+  .prose li { margin: 0.2rem 0; }
+  .prose table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.85rem; }
+  .prose th { background: #eef5f9; padding: 6px 8px; border: 1px solid #d9e2ec; text-align: left; font-weight: 600; }
+  .prose td { padding: 6px 8px; border: 1px solid #d9e2ec; }
+  .prose strong { font-weight: 600; }
+  #drop-overlay { display: none; }
+  #drop-overlay.active { display: flex; }
+  .panel-transition { transition: margin-right 0.3s ease, width 0.3s ease; }
+  #right-panel { transition: transform 0.3s ease; }
+  #right-panel.hidden-panel { transform: translateX(100%); }
+</style>
+</head>
+<body class="bg-background text-on-surface flex h-screen overflow-hidden antialiased">
+
+<!-- LEFT SIDEBAR -->
+<aside class="fixed inset-y-0 left-0 flex flex-col w-[260px] bg-primary-container border-r border-slate-800 z-50">
+  <div class="px-6 py-6 flex flex-col gap-1">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 bg-secondary-container rounded-lg flex items-center justify-center text-on-secondary-fixed">
+        <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">eco</span>
+      </div>
+      <h1 class="text-white font-h2 text-lg tracking-tight">SustainChat</h1>
+    </div>
+    <p class="text-[#8aa4b8] font-body-sm text-[12px]">Sustainability Assistant</p>
+  </div>
+
+  <div class="px-4 py-2 flex-1 flex flex-col overflow-hidden">
+    <div class="h-px bg-slate-800 w-full mb-4"></div>
+    <div class="flex items-center justify-between px-2 mb-3">
+      <span class="text-[#8aa4b8] font-label-caps uppercase tracking-widest text-[11px]">Documents</span>
+      <span class="material-symbols-outlined text-white text-sm cursor-pointer hover:text-secondary-container transition-colors" onclick="document.getElementById('sidebar-file-input').click()">add</span>
+    </div>
+
+    <!-- Hidden file input for sidebar -->
+    <input type="file" id="sidebar-file-input" multiple accept=".pdf,.xlsx,.xlsm,.csv" class="hidden" onchange="handleSidebarUpload(this.files)"/>
+
+    <!-- Upload Zone -->
+    <div id="sidebar-upload-zone"
+         class="border-2 border-dashed border-[#1e3a52] rounded-lg p-4 mb-4 flex flex-col items-center justify-center gap-2 hover:bg-slate-800/30 transition-colors cursor-pointer"
+         onclick="document.getElementById('sidebar-file-input').click()"
+         ondragover="event.preventDefault()"
+         ondrop="handleSidebarDrop(event)">
+      <span class="material-symbols-outlined text-[#8aa4b8]">cloud_upload</span>
+      <p class="text-white font-body-sm text-center text-[13px]">Drop PDF or Excel files</p>
+      <p class="text-[#8aa4b8] font-body-sm text-[12px]">or click to browse</p>
+    </div>
+
+    <!-- File List -->
+    <div id="file-list" class="flex flex-col gap-2 mb-4 overflow-y-auto flex-1 min-h-0"></div>
+
+    <div class="mt-auto">
+      <div class="h-px bg-slate-800 w-full mb-4"></div>
+      <div class="flex items-center justify-between px-2 mb-3">
+        <span class="text-[#8aa4b8] font-label-caps uppercase tracking-widest text-[11px]">Session</span>
+      </div>
+      <div class="flex flex-col gap-3">
+        <button onclick="newSession()" class="w-full border border-white text-white font-body-sm py-2 px-4 rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center gap-2">
+          <span class="material-symbols-outlined text-sm">chat</span> New Session
+        </button>
+        <button id="generate-btn" onclick="generateReport()" class="w-full bg-[#22577a] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#22577a]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">
+          <span class="material-symbols-outlined text-sm" id="generate-icon">assessment</span>
+          <span id="generate-text">Generate Report</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div class="p-4 border-t border-slate-800">
+    <div class="flex items-center gap-3 px-2">
+      <div id="status-dot" class="w-2 h-2 bg-yellow-400 rounded-full"></div>
+      <span id="status-text" class="text-white font-body-sm text-[13px]">No files uploaded</span>
+    </div>
+  </div>
+</aside>
+
+<!-- CENTER PANEL -->
+<main id="main-panel" class="flex-1 ml-[260px] flex flex-col bg-[#f7fafc] h-screen panel-transition" style="margin-right: 0;">
+  <!-- Top Bar -->
+  <header class="h-16 px-6 flex items-center justify-between bg-white border-b border-[#d9e2ec] sticky top-0 z-40 flex-shrink-0">
+    <div class="flex items-center gap-4">
+      <h2 class="text-primary font-h3 text-lg">Sustainability Assistant</h2>
+      <div class="flex bg-surface-container-low p-1 rounded-full border border-outline-variant">
+        <button id="lang-en" onclick="setLanguage('English')" class="px-3 py-1 rounded-full text-primary font-body-sm bg-white shadow-sm">EN</button>
+        <button id="lang-tr" onclick="setLanguage('Turkish')" class="px-3 py-1 rounded-full text-outline font-body-sm hover:text-primary transition-colors">TR</button>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 px-3 py-1 bg-primary text-white rounded-lg font-body-sm text-[12px] font-bold tracking-tight">
+        <span class="material-symbols-outlined text-[14px]">bolt</span> GPT-4o
+      </div>
+      <button id="open-panel-btn" onclick="openPanel()" class="hidden w-10 h-10 rounded-full bg-surface-container flex items-center justify-center hover:bg-surface-container-high transition-colors" title="Open report panel">
+        <span class="material-symbols-outlined text-[18px]">chevron_left</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Drop Overlay -->
+  <div id="drop-overlay" class="absolute inset-0 z-30 bg-[#22577a]/80 flex flex-col items-center justify-center gap-4 pointer-events-none rounded-lg m-2">
+    <span class="material-symbols-outlined text-white text-6xl">upload_file</span>
+    <p class="text-white font-h3 text-xl">Drop your file here</p>
+  </div>
+
+  <!-- Chat Messages -->
+  <div id="chat-messages" class="flex-1 overflow-y-auto p-6 flex flex-col gap-6">
+    <!-- Empty State -->
+    <div id="empty-state" class="flex-1 flex flex-col items-center justify-center gap-6 py-16">
+      <div class="w-20 h-20 rounded-2xl bg-[#eef5f9] flex items-center justify-center">
+        <span class="material-symbols-outlined text-[#22577a] text-4xl" style="font-variation-settings: 'FILL' 1;">eco</span>
+      </div>
+      <div class="text-center">
+        <h3 class="font-h3 text-primary mb-2">Welcome to SustainChat</h3>
+        <p class="font-body-md text-outline max-w-sm">Upload a PDF or Excel sustainability file to get started. Ask questions or generate a full district-level report.</p>
+      </div>
+      <div class="flex flex-wrap gap-3 justify-center">
+        <button onclick="setInput('Which districts have the highest carbon emissions?')" class="px-4 py-2 bg-white border border-[#d9e2ec] rounded-full font-body-sm text-on-surface hover:bg-surface-container transition-colors shadow-sm">
+          Which districts have the highest emissions?
+        </button>
+        <button onclick="setInput('Generate a full sustainability report in English')" class="px-4 py-2 bg-white border border-[#d9e2ec] rounded-full font-body-sm text-on-surface hover:bg-surface-container transition-colors shadow-sm">
+          Generate a full sustainability report
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat Input -->
+  <div class="p-4 bg-white border-t border-[#d9e2ec] flex-shrink-0">
+    <!-- Attachment preview -->
+    <div id="attach-preview" class="hidden flex-wrap gap-2 mb-2 px-2"></div>
+    <div class="relative max-w-4xl mx-auto">
+      <input id="chat-input" type="text"
+             class="w-full bg-surface-container-low border border-[#d9e2ec] rounded-xl py-4 pl-12 pr-28 focus:ring-1 focus:ring-secondary focus:border-secondary font-body-md outline-none transition-all"
+             placeholder="Ask about emissions, districts, or carbon footprint..."
+             onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();sendMessage();}"/>
+      <input type="file" id="chat-file-input" multiple accept=".pdf,.xlsx,.xlsm,.csv" class="hidden" onchange="handleChatAttach(this.files)"/>
+      <div class="absolute left-4 top-1/2 -translate-y-1/2">
+        <span class="material-symbols-outlined text-outline cursor-pointer hover:text-secondary transition-colors text-[22px]" onclick="document.getElementById('chat-file-input').click()">attach_file</span>
+      </div>
+      <div class="absolute right-3 top-1/2 -translate-y-1/2">
+        <button id="send-btn" onclick="sendMessage()" class="bg-secondary text-white px-4 py-2 rounded-lg font-body-sm hover:opacity-90 transition-opacity flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
+          Send <span class="material-symbols-outlined text-sm">send</span>
+        </button>
+      </div>
+    </div>
+    <p class="text-[#8aa4b8] font-body-sm text-[11px] text-center mt-2">
+      You can also ask about the generated report — all context is shared.
+    </p>
+  </div>
+</main>
+
+<!-- RIGHT PANEL -->
+<aside id="right-panel" class="fixed inset-y-0 right-0 w-[320px] bg-white border-l border-[#d9e2ec] z-50 flex flex-col shadow-[-4px_0_12px_rgba(0,0,0,0.03)] hidden-panel">
+  <header class="h-16 px-6 flex items-center justify-between border-b border-[#d9e2ec] flex-shrink-0">
+    <h3 class="font-h3 text-primary text-md">Report Preview</h3>
+    <button onclick="closePanel()" class="text-outline hover:text-error transition-colors">
+      <span class="material-symbols-outlined">close</span>
+    </button>
+  </header>
+
+  <!-- Tabs -->
+  <div class="flex border-b border-[#d9e2ec] flex-shrink-0" id="panel-tabs">
+    <button onclick="switchTab('summary')" id="tab-summary" class="flex-1 py-3 text-[12px] font-bold text-secondary border-b-2 border-secondary bg-surface-container-low">SUMMARY</button>
+    <button onclick="switchTab('charts')" id="tab-charts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">CHARTS</button>
+    <button onclick="switchTab('districts')" id="tab-districts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">DISTRICTS</button>
+  </div>
+
+  <!-- Tab content -->
+  <div class="flex-1 overflow-auto">
+    <div id="tab-content-summary" class="p-4 prose text-sm text-on-surface"></div>
+    <div id="tab-content-charts" class="p-4 flex flex-col gap-4 hidden"></div>
+    <div id="tab-content-districts" class="hidden">
+      <table class="w-full text-[12px] border-collapse">
+        <thead class="sticky top-0 bg-[#eef5f9] z-10 shadow-sm">
+          <tr>
+            <th class="text-left p-3 font-bold text-primary border-b border-[#d9e2ec]">District</th>
+            <th class="text-right p-3 font-bold text-primary border-b border-[#d9e2ec]">Total</th>
+            <th class="text-center p-3 font-bold text-primary border-b border-[#d9e2ec]">Growth</th>
+          </tr>
+        </thead>
+        <tbody id="districts-tbody" class="divide-y divide-[#d9e2ec]"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Panel Actions -->
+  <div class="p-4 bg-[#f7fafc] border-t border-[#d9e2ec] flex flex-col gap-2 flex-shrink-0">
+    <button onclick="window.open('/report/html','_blank')" class="w-full border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">
+      View Full Report
+    </button>
+    <button onclick="downloadPDF()" class="w-full bg-secondary text-white font-body-sm py-2 px-4 rounded hover:opacity-90 transition-opacity flex items-center justify-center gap-2 shadow-sm">
+      <span class="material-symbols-outlined text-sm">download</span> Download PDF
+    </button>
+  </div>
+</aside>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let currentLanguage = 'English';
+  let pendingFiles = [];
+  let reportData = null;
+  let panelOpen = false;
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    setupDragDrop();
+    marked.setOptions({ breaks: true, gfm: true });
+  });
+
+  // ── Language ───────────────────────────────────────────────────────────────
+  function setLanguage(lang) {
+    currentLanguage = lang;
+    const isEn = lang === 'English';
+    document.getElementById('lang-en').className = isEn
+      ? 'px-3 py-1 rounded-full text-primary font-body-sm bg-white shadow-sm'
+      : 'px-3 py-1 rounded-full text-outline font-body-sm hover:text-primary transition-colors';
+    document.getElementById('lang-tr').className = !isEn
+      ? 'px-3 py-1 rounded-full text-primary font-body-sm bg-white shadow-sm'
+      : 'px-3 py-1 rounded-full text-outline font-body-sm hover:text-primary transition-colors';
+  }
+
+  // ── File Upload ────────────────────────────────────────────────────────────
+  function handleSidebarUpload(files) {
+    if (!files.length) return;
+    uploadFiles(Array.from(files));
+  }
+
+  function handleSidebarDrop(event) {
+    event.preventDefault();
+    uploadFiles(Array.from(event.dataTransfer.files));
+  }
+
+  function handleChatAttach(files) {
+    if (!files.length) return;
+    pendingFiles = [...pendingFiles, ...Array.from(files)];
+    renderAttachPreview();
+  }
+
+  function renderAttachPreview() {
+    const preview = document.getElementById('attach-preview');
+    if (!pendingFiles.length) { preview.classList.add('hidden'); return; }
+    preview.classList.remove('hidden');
+    preview.classList.add('flex');
+    preview.innerHTML = pendingFiles.map((f, i) => `
+      <div class="flex items-center gap-1.5 bg-white border border-[#d9e2ec] rounded-full px-3 py-1 shadow-sm">
+        <span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${f.name.endsWith('.pdf') ? 'bg-error text-white' : 'bg-on-secondary-container text-white'}">${f.name.endsWith('.pdf') ? 'PDF' : 'XLS'}</span>
+        <span class="font-body-sm text-[12px] text-on-surface max-w-[120px] truncate">${f.name}</span>
+        <span class="material-symbols-outlined text-error text-sm cursor-pointer" onclick="removePending(${i})">close</span>
+      </div>`).join('');
+  }
+
+  function removePending(i) {
+    pendingFiles.splice(i, 1);
+    renderAttachPreview();
+  }
+
+  async function uploadFiles(files) {
+    setStatus('indexing', `Indexing ${files.length} file${files.length > 1 ? 's' : ''}...`);
+    const formData = new FormData();
+    files.forEach(f => formData.append('files', f));
+
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      updateFileList(data.files, true);
+      setStatus('ready', 'Ready');
+      const names = data.files.map(f => `**${f.name}**`).join(', ');
+      const chunkNote = data.stats.chunk_count > 0
+        ? `_Indexed ${data.stats.chunk_count} text chunks in ${data.stats.elapsed_seconds}s._`
+        : `_Spreadsheet parsed and ready for district analysis in ${data.stats.elapsed_seconds}s._`;
+      addAssistantMessage(
+        `I've indexed ${names}. You can now ask questions about it or click **Generate Report** to create a full sustainability report.\n\n${chunkNote}`
+      );
+      hideEmptyState();
+    } catch (e) {
+      setStatus('ready', 'Ready');
+      addAssistantMessage(`⚠️ Upload failed: ${e.message}`);
+    }
+  }
+
+  function updateFileList(newFiles, append = false) {
+    const list = document.getElementById('file-list');
+    if (!append) list.innerHTML = '';
+    newFiles.forEach(f => {
+      const el = document.createElement('div');
+      el.className = 'flex items-center justify-between p-2 rounded-lg bg-slate-800/50 hover:bg-slate-800 transition-colors cursor-pointer group';
+      el.innerHTML = `
+        <div class="flex items-center gap-3">
+          <span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${f.type === 'PDF' ? 'bg-error' : 'bg-on-secondary-container'} text-white">${f.type}</span>
+          <span class="text-white font-body-sm text-[13px] truncate max-w-[140px]">${f.name}</span>
+        </div>
+        <span class="material-symbols-outlined text-[#8aa4b8] text-sm opacity-0 group-hover:opacity-100">description</span>`;
+      list.appendChild(el);
+    });
+  }
+
+  // ── Chat ───────────────────────────────────────────────────────────────────
+  async function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text && !pendingFiles.length) return;
+
+    // Upload pending files first
+    if (pendingFiles.length) {
+      const filesToUpload = [...pendingFiles];
+      pendingFiles = [];
+      renderAttachPreview();
+      addUserFileChip(filesToUpload.map(f => f.name).join(', '));
+      await uploadFiles(filesToUpload);
+      if (!text) return;
+    }
+
+    if (!text) return;
+    input.value = '';
+    setSendDisabled(true);
+
+    // Check if this is a report generation request
+    const lower = text.toLowerCase();
+    if (lower.includes('generate') && (lower.includes('report') || lower.includes('rapor'))) {
+      addUserMessage(text);
+      await generateReportFromChat(text);
+      setSendDisabled(false);
+      return;
+    }
+
+    addUserMessage(text);
+    const typingEl = addTypingIndicator();
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, language: currentLanguage }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        typingEl.remove();
+        addAssistantMessage(`⚠️ ${err.detail || 'Something went wrong.'}`);
+        setSendDisabled(false);
+        return;
+      }
+
+      typingEl.remove();
+      const { el: msgEl, contentEl } = addAssistantMessageElement();
+      let buffer = '';
+      let accumulated = '';
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.done) break;
+            if (d.error) { contentEl.innerHTML = marked.parse(`⚠️ ${d.error}`); break; }
+            if (d.text) { accumulated += d.text; contentEl.innerHTML = marked.parse(accumulated); scrollToBottom(); }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      typingEl.remove();
+      addAssistantMessage(`⚠️ Connection error: ${e.message}`);
+    }
+    setSendDisabled(false);
+  }
+
+  // ── Report Generation ──────────────────────────────────────────────────────
+  async function generateReport() {
+    const fileList = document.getElementById('file-list');
+    if (!fileList.children.length) {
+      addAssistantMessage('⚠️ Please upload at least one file before generating a report.');
+      hideEmptyState();
+      return;
+    }
+    await generateReportFromChat(null);
+  }
+
+  async function generateReportFromChat(triggerMessage) {
+    hideEmptyState();
+    setStatus('generating', 'Generating report...');
+    setGenerateBtnLoading(true);
+
+    const title = currentLanguage === 'Turkish'
+      ? 'İstanbul Büyükşehir Belediyesi Sürdürülebilirlik Raporu'
+      : 'Istanbul Metropolitan Municipality Sustainability Report';
+
+    const typingEl = addTypingIndicator('Generating your sustainability report — this may take up to a minute...');
+
+    try {
+      const res = await fetch('/generate-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, language: currentLanguage }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        typingEl.remove();
+        addAssistantMessage(`⚠️ Report generation failed: ${err.detail}`);
+        setStatus('ready', 'Ready');
+        setGenerateBtnLoading(false);
+        return;
+      }
+
+      reportData = await res.json();
+      typingEl.remove();
+      addReportCard(reportData);
+      populateRightPanel(reportData);
+      openPanel();
+      setStatus('ready', 'Ready');
+    } catch (e) {
+      typingEl.remove();
+      addAssistantMessage(`⚠️ Error: ${e.message}`);
+      setStatus('ready', 'Ready');
+    }
+    setGenerateBtnLoading(false);
+  }
+
+  async function downloadPDF() {
+    window.open('/report/pdf', '_blank');
+  }
+
+  // ── Right Panel ────────────────────────────────────────────────────────────
+  function openPanel() {
+    panelOpen = true;
+    document.getElementById('right-panel').classList.remove('hidden-panel');
+    document.getElementById('main-panel').style.marginRight = '320px';
+    document.getElementById('open-panel-btn').classList.add('hidden');
+  }
+
+  function closePanel() {
+    panelOpen = false;
+    document.getElementById('right-panel').classList.add('hidden-panel');
+    document.getElementById('main-panel').style.marginRight = '0';
+    if (reportData) document.getElementById('open-panel-btn').classList.remove('hidden');
+  }
+
+  function switchTab(name) {
+    ['summary', 'charts', 'districts'].forEach(t => {
+      const btn = document.getElementById(`tab-${t}`);
+      const content = document.getElementById(`tab-content-${t}`);
+      if (t === name) {
+        btn.className = 'flex-1 py-3 text-[12px] font-bold text-secondary border-b-2 border-secondary bg-surface-container-low';
+        content.classList.remove('hidden');
+      } else {
+        btn.className = 'flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors';
+        content.classList.add('hidden');
+      }
+    });
+  }
+
+  function populateRightPanel(data) {
+    // Summary
+    document.getElementById('tab-content-summary').innerHTML = data.markdown
+      ? marked.parse(data.markdown)
+      : '<p class="text-outline text-sm">No summary available.</p>';
+
+    // Charts
+    const chartsEl = document.getElementById('tab-content-charts');
+    if (data.charts && data.charts.length) {
+      chartsEl.innerHTML = data.charts.map(c => `
+        <div>
+          <p class="font-body-sm font-semibold text-primary mb-2">${c.title}</p>
+          <img src="/charts/${c.filename}" class="w-full rounded border border-[#d9e2ec]" alt="${c.title}"/>
+        </div>`).join('');
+    } else {
+      chartsEl.innerHTML = '<p class="text-outline text-sm">No charts available.</p>';
+    }
+
+    // Districts
+    const tbody = document.getElementById('districts-tbody');
+    if (data.metrics && data.metrics.length) {
+      tbody.innerHTML = data.metrics.map(m => {
+        const rawGrowth = m.growth != null ? parseFloat(m.growth) : null;
+        const growth = (rawGrowth !== null && rawGrowth !== 0) ? rawGrowth : null;
+        const growthHtml = growth !== null
+          ? `<span class="px-2 py-0.5 rounded-full font-bold text-[11px] ${growth > 0 ? 'bg-error-container text-error' : 'bg-green-100 text-green-700'}">${growth > 0 ? '+' : ''}${(growth * 100).toFixed(1)}%</span>`
+          : '<span class="text-outline text-[11px]">—</span>';
+        const total = m.total_emission != null ? parseFloat(m.total_emission).toLocaleString(undefined, {maximumFractionDigits: 0}) : '—';
+        return `<tr class="hover:bg-surface-container-lowest transition-colors">
+          <td class="p-3 font-medium">${m.district || '—'}</td>
+          <td class="p-3 text-right text-[11px]">${total}</td>
+          <td class="p-3 text-center">${growthHtml}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      tbody.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-outline text-sm">No district data available.</td></tr>';
+    }
+  }
+
+  // ── Session ────────────────────────────────────────────────────────────────
+  async function newSession() {
+    await fetch('/session', { method: 'DELETE' });
+    document.getElementById('chat-messages').innerHTML = '';
+    document.getElementById('file-list').innerHTML = '';
+    reportData = null;
+    pendingFiles = [];
+    renderAttachPreview();
+    closePanel();
+    document.getElementById('open-panel-btn').classList.add('hidden');
+    setStatus('empty', 'No files uploaded');
+    showEmptyState();
+  }
+
+  // ── UI Helpers ─────────────────────────────────────────────────────────────
+  function addUserMessage(text) {
+    appendToChat(`
+      <div class="flex flex-col items-end gap-2">
+        <div class="px-4 py-2 bg-secondary text-white rounded-2xl rounded-tr-none max-w-[85%]">
+          <p class="font-body-md">${escHtml(text)}</p>
+        </div>
+      </div>`);
+  }
+
+  function addUserFileChip(names) {
+    appendToChat(`
+      <div class="flex flex-col items-end gap-2">
+        <div class="px-4 py-2 bg-secondary text-white rounded-2xl rounded-tr-none flex items-center gap-2">
+          <span class="material-symbols-outlined text-sm">description</span>
+          <span class="font-body-sm">${escHtml(names)}</span>
+        </div>
+      </div>`);
+  }
+
+  function addAssistantMessage(markdown) {
+    const { contentEl } = addAssistantMessageElement();
+    contentEl.innerHTML = marked.parse(markdown);
+    scrollToBottom();
+  }
+
+  function addAssistantMessageElement() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex gap-4 max-w-[85%]';
+    wrapper.innerHTML = `
+      <div class="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center flex-shrink-0">
+        <span class="material-symbols-outlined text-white text-[18px]" style="font-variation-settings: 'FILL' 1;">eco</span>
+      </div>
+      <div class="p-4 bg-white border border-[#d9e2ec] rounded-2xl rounded-tl-none shadow-sm prose text-sm flex-1 min-w-0"></div>`;
+    document.getElementById('chat-messages').appendChild(wrapper);
+    scrollToBottom();
+    return { el: wrapper, contentEl: wrapper.querySelector('.prose') };
+  }
+
+  function addTypingIndicator(text) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex gap-4 max-w-[85%]';
+    wrapper.innerHTML = `
+      <div class="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center flex-shrink-0">
+        <span class="material-symbols-outlined text-white text-[18px]" style="font-variation-settings: 'FILL' 1;">eco</span>
+      </div>
+      <div class="p-4 bg-white border border-[#d9e2ec] rounded-2xl rounded-tl-none shadow-sm flex items-center gap-3">
+        <div class="flex gap-1">
+          <span class="w-2 h-2 bg-secondary rounded-full animate-bounce" style="animation-delay:0ms"></span>
+          <span class="w-2 h-2 bg-secondary rounded-full animate-bounce" style="animation-delay:150ms"></span>
+          <span class="w-2 h-2 bg-secondary rounded-full animate-bounce" style="animation-delay:300ms"></span>
+        </div>
+        ${text ? `<span class="font-body-sm text-outline">${escHtml(text)}</span>` : ''}
+      </div>`;
+    document.getElementById('chat-messages').appendChild(wrapper);
+    scrollToBottom();
+    return wrapper;
+  }
+
+  function addReportCard(data) {
+    const districtCount = (data.metrics || []).length;
+    const chartCount = (data.charts || []).length;
+    appendToChat(`
+      <div class="flex gap-4 max-w-[85%]">
+        <div class="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center flex-shrink-0">
+          <span class="material-symbols-outlined text-white text-[18px]" style="font-variation-settings: 'FILL' 1;">eco</span>
+        </div>
+        <div class="p-6 bg-white border border-[#d9e2ec] rounded-2xl rounded-tl-none shadow-sm w-full border-t-4 border-t-[#22577a]">
+          <div class="flex items-start gap-4 mb-4">
+            <div class="p-3 bg-[#eef5f9] rounded-lg flex-shrink-0">
+              <span class="material-symbols-outlined text-on-secondary-container text-3xl">picture_as_pdf</span>
+            </div>
+            <div>
+              <h4 class="font-h3 text-primary text-[15px]">${escHtml(data.title)}</h4>
+              <p class="font-body-sm text-outline">${districtCount} districts analysed &nbsp;•&nbsp; ${chartCount} charts generated &nbsp;•&nbsp; ${data.language}</p>
+            </div>
+          </div>
+          <div class="flex gap-3">
+            <button onclick="window.open('/report/html','_blank')" class="flex-1 border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">View Report</button>
+            <button onclick="downloadPDF()" class="flex-1 bg-secondary text-white font-body-sm py-2 px-4 rounded hover:opacity-90 transition-opacity">Download PDF</button>
+          </div>
+        </div>
+      </div>`);
+    scrollToBottom();
+  }
+
+  function appendToChat(html) {
+    const messages = document.getElementById('chat-messages');
+    const el = document.createElement('div');
+    el.innerHTML = html;
+    messages.appendChild(el.firstElementChild);
+    scrollToBottom();
+  }
+
+  function scrollToBottom() {
+    const el = document.getElementById('chat-messages');
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function hideEmptyState() {
+    const es = document.getElementById('empty-state');
+    if (es) es.remove();
+  }
+
+  function showEmptyState() {
+    const messages = document.getElementById('chat-messages');
+    if (document.getElementById('empty-state')) return;
+    messages.innerHTML = `
+      <div id="empty-state" class="flex-1 flex flex-col items-center justify-center gap-6 py-16">
+        <div class="w-20 h-20 rounded-2xl bg-[#eef5f9] flex items-center justify-center">
+          <span class="material-symbols-outlined text-[#22577a] text-4xl" style="font-variation-settings: 'FILL' 1;">eco</span>
+        </div>
+        <div class="text-center">
+          <h3 class="font-h3 text-primary mb-2">Welcome to SustainChat</h3>
+          <p class="font-body-md text-outline max-w-sm">Upload a PDF or Excel sustainability file to get started. Ask questions or generate a full district-level report.</p>
+        </div>
+        <div class="flex flex-wrap gap-3 justify-center">
+          <button onclick="setInput('Which districts have the highest carbon emissions?')" class="px-4 py-2 bg-white border border-[#d9e2ec] rounded-full font-body-sm text-on-surface hover:bg-surface-container transition-colors shadow-sm">Which districts have the highest emissions?</button>
+          <button onclick="setInput('Generate a full sustainability report in English')" class="px-4 py-2 bg-white border border-[#d9e2ec] rounded-full font-body-sm text-on-surface hover:bg-surface-container transition-colors shadow-sm">Generate a full sustainability report</button>
+        </div>
+      </div>`;
+  }
+
+  function setStatus(state, text) {
+    const dot = document.getElementById('status-dot');
+    const label = document.getElementById('status-text');
+    label.textContent = text;
+    dot.className = 'w-2 h-2 rounded-full ' + {
+      ready: 'bg-green-500 animate-pulse',
+      indexing: 'bg-yellow-400 animate-pulse',
+      generating: 'bg-blue-400 animate-pulse',
+      empty: 'bg-yellow-400',
+    }[state];
+  }
+
+  function setGenerateBtnLoading(loading) {
+    document.getElementById('generate-icon').textContent = loading ? 'hourglass_top' : 'assessment';
+    document.getElementById('generate-text').textContent = loading ? 'Generating...' : 'Generate Report';
+    document.getElementById('generate-btn').disabled = loading;
+  }
+
+  function setSendDisabled(disabled) {
+    document.getElementById('send-btn').disabled = disabled;
+  }
+
+  function setInput(text) {
+    document.getElementById('chat-input').value = text;
+    document.getElementById('chat-input').focus();
+  }
+
+  function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── Drag and Drop on chat area ─────────────────────────────────────────────
+  function setupDragDrop() {
+    const main = document.getElementById('main-panel');
+    main.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-overlay').classList.add('active'); });
+    main.addEventListener('dragleave', e => { if (!main.contains(e.relatedTarget)) document.getElementById('drop-overlay').classList.remove('active'); });
+    main.addEventListener('drop', e => {
+      e.preventDefault();
+      document.getElementById('drop-overlay').classList.remove('active');
+      const files = Array.from(e.dataTransfer.files).filter(f => f.name.match(/\.(pdf|xlsx|xlsm|csv)$/i));
+      if (files.length) uploadFiles(files);
+    });
+  }
+</script>
+</body>
+</html>

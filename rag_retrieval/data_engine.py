@@ -30,6 +30,7 @@ class DataEngine:
         self.metric_column = self._detect_metric_column()
         self.unit_column = self._detect_unit_column()
         self.time_column = self._detect_time_column()
+        self.growth_rate_column = self._detect_growth_rate_column()
 
     def analyze_district(self, district: str) -> dict:
         if self.dataframe.empty or not self.district_column:
@@ -74,6 +75,14 @@ class DataEngine:
         population = self._population_for_district(district)
         household_count = self._safe_divide(population, self.avg_household_size) if population is not None else None
         growth = self._growth_for_rows(district_rows)
+        if growth is None and self.growth_rate_column:
+            col = self.growth_rate_column
+            if col in district_rows.columns:
+                values = self._numeric_series(district_rows[col]).dropna()
+                if not values.empty:
+                    raw = float(values.iloc[0])
+                    # normalize: if stored as whole-number percent (e.g. 5.0 = 5%), divide by 100
+                    growth = raw / 100.0 if abs(raw) > 1.5 else raw
         warnings = self._analysis_warnings(
             electricity=electricity,
             gas=gas,
@@ -165,6 +174,9 @@ class DataEngine:
 
     def _detect_emissions_column(self) -> str | None:
         return self._detect_consumption_column(("emission", "emissions", "carbon", "co2", "tco2e"))
+
+    def _detect_growth_rate_column(self) -> str | None:
+        return self._detect_consumption_column(("growth", "büyüme", "degisim", "change_rate", "degisim_orani"))
 
     def _detect_consumption_column(self, terms: tuple[str, ...]) -> str | None:
         best_column: str | None = None
@@ -313,7 +325,7 @@ class DataEngine:
             return None
 
         grouped = valid_rows.groupby("_data_engine_time")["_data_engine_value"].sum().sort_index()
-        if grouped.empty:
+        if grouped.empty or len(grouped) < 2:
             return None
 
         baseline_key = float(self.baseline_year) if self.baseline_year is not None else grouped.index[0]
