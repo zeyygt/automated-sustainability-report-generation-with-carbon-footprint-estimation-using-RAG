@@ -5,6 +5,8 @@ from .data_engine import DataEngine
 from .fact_extractor import FactExtractor
 from .models import Chunk, DocumentInput, ParsedDocument, ParsedElement, RetrievalHit
 from .pipeline import analyze_data_engines, build_query_response, extract_district, format_retrieval_hits, handle_query
+from .ragas_evaluation import run_ragas_retrieval_evaluation
+from .ragas_generation_evaluation import run_ragas_generation_evaluation
 from .report_builder import build_report_input
 from .report_models import GeneratedReport, ReportAssets, ReportInput
 from .report_pipeline import generate_sustainability_report
@@ -37,6 +39,8 @@ __all__ = [
     "handle_query",
     "combine_dataframes",
     "parsed_tables_to_dataframe",
+    "run_ragas_generation_evaluation",
+    "run_ragas_retrieval_evaluation",
     "route_query",
     "spreadsheet_to_dataframe",
 ]

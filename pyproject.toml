@@ -17,6 +17,7 @@ embeddings = ["sentence-transformers>=3.0"]
 vector-db = ["qdrant-client>=1.10", "fastembed>=0.3"]
 ocr = ["pytesseract>=0.3", "pillow>=10"]
 generation = ["openai>=2.0", "matplotlib>=3.8", "reportlab>=4.0", "pillow>=10"]
+evaluation = ["ragas>=0.4", "datasets>=4.8", "rapidfuzz>=3.14"]
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
