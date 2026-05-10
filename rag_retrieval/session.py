@@ -12,6 +12,8 @@ from .config import ChunkingConfig, EmbeddingConfig, ParserConfig, RetrievalConf
 from .data_engine import DataEngine
 from .embeddings import Embedder, build_embedder
 from .fact_extractor import FactExtractor
+from .formula_extractor import FormulaExtractor
+from .llm_formula_extractor import LLMFormulaExtractor
 from .index import BM25Index, InMemoryVectorIndex
 from .ingestion import DocumentIngestor
 from .models import BuildStats, Chunk, ParsedDocument, RetrievalHit
@@ -50,6 +52,9 @@ class RetrievalSession:
         self.fact_dataframes: dict[str, object] = {}
         self.data_engines: dict[str, DataEngine | None] = {}
         self.chunks: dict[str, Chunk] = {}
+        self.document_emission_factors: dict[str, dict[str, float]] = {}
+        self.custom_formula = None  # ExtractedFormula | None
+        self.formula_extraction_method: str = "default"  # "direct" | "rag_assisted" | "default"
 
     def build_index(self, file_paths: Iterable[str | Path]) -> BuildStats:
         """Parse, chunk, embed, and index runtime uploads for this session."""
@@ -71,12 +76,19 @@ class RetrievalSession:
         self.vector_index.add(chunks, vectors)
         self.keyword_index.add(chunks)
         fact_extractor = FactExtractor()
+        formula_extractor = FormulaExtractor()
         for document in parsed_documents:
             self.documents[document.doc_id] = document
         for document in pdf_documents:
             self.pdf_documents[document.doc_id] = document
         for document in excel_documents:
             self.excel_documents[document.doc_id] = document
+
+        # Pass 1: parse dataframes and collect emission factors from every document.
+        # Factors are gathered session-wide so a formula in a PDF methodology doc
+        # applies to consumption DataEngines from separate spreadsheet uploads.
+        table_dfs: dict[str, object] = {}
+        fact_dfs: dict[str, object] = {}
 
         for document in parsed_documents:
             try:
@@ -91,18 +103,66 @@ class RetrievalSession:
                 except ImportError:
                     fact_dataframe = None
 
+            table_dfs[document.doc_id] = table_dataframe
+            fact_dfs[document.doc_id] = fact_dataframe
             self.table_dataframes[document.doc_id] = table_dataframe
             self.fact_dataframes[document.doc_id] = fact_dataframe
             if document.metadata.get("parser") == "spreadsheet":
                 self.spreadsheet_dataframes[document.doc_id] = table_dataframe
 
+            doc_factors = formula_extractor.extract(document, table_dataframe)
+            if doc_factors:
+                self.document_emission_factors[document.doc_id] = doc_factors
+
+        # Merge all per-document factors into one session-level dict.
+        # If two documents define the same key, last-parsed value wins.
+        session_factors: dict[str, float] = {}
+        for factors in self.document_emission_factors.values():
+            session_factors.update(factors)
+
+        # ── Formula extraction: three-level fallback chain ────────────────────
+        # Level 1: direct LLM extraction on all non-spreadsheet document text.
+        # Level 2: RAG-assisted — search the index for formula-related chunks,
+        #          run LLM extraction on that focused text.
+        # Level 3: default formula (consumption × emission_factor) with a warning.
+        llm_extractor = LLMFormulaExtractor()
+        self.custom_formula = llm_extractor.extract_from_documents(list(self.pdf_documents.values()))
+
+        if self.custom_formula is not None:
+            self.formula_extraction_method = "direct"
+        elif chunks:
+            # Level 2: ask the vector index for the most formula-relevant chunks
+            _formula_queries = [
+                "emission formula calculation CO2 total carbon footprint",
+                "CO2 equals electricity natural gas factor formula",
+            ]
+            rag_texts: list[str] = []
+            for _q in _formula_queries:
+                for hit in self.retrieval.search(_q, top_k=3):
+                    chunk_text = getattr(getattr(hit, "chunk", None), "text", None)
+                    if chunk_text and chunk_text not in rag_texts:
+                        rag_texts.append(chunk_text)
+            if rag_texts:
+                self.custom_formula = llm_extractor.extract_from_text("\n\n".join(rag_texts))
+                if self.custom_formula is not None:
+                    self.formula_extraction_method = "rag_assisted"
+
+        if self.custom_formula is None:
+            self.formula_extraction_method = "default"
+
+        # Pass 2: create DataEngines with session-level factors and custom formula.
+        for document in parsed_documents:
             try:
-                dataframe = combine_dataframes(table_dataframe, fact_dataframe)
+                dataframe = combine_dataframes(table_dfs[document.doc_id], fact_dfs[document.doc_id])
             except ImportError:
                 dataframe = None
 
             if dataframe is not None and not dataframe.empty:
-                self.data_engines[document.doc_id] = DataEngine(dataframe)
+                self.data_engines[document.doc_id] = DataEngine(
+                    dataframe,
+                    emission_factors=session_factors or None,
+                    custom_formula=self.custom_formula,
+                )
             else:
                 self.data_engines[document.doc_id] = None
         for chunk in chunks:
@@ -132,6 +192,9 @@ class RetrievalSession:
         self.fact_dataframes.clear()
         self.data_engines.clear()
         self.chunks.clear()
+        self.document_emission_factors.clear()
+        self.custom_formula = None
+        self.formula_extraction_method = "default"
 
 
 class SessionManager:

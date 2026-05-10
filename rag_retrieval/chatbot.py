@@ -32,6 +32,35 @@ def stream_chat_response(
         if text:
             context_parts.append(text)
 
+    # Expose the formula extraction outcome so the assistant can reference it
+    custom_formula = getattr(session, "custom_formula", None)
+    formula_method = getattr(session, "formula_extraction_method", "default")
+    if custom_formula:
+        context_parts.append(
+            f"Custom emission formula extracted from documents "
+            f"(method: {formula_method}):\n"
+            f"  expression: {custom_formula.expression}\n"
+            f"  constants: {custom_formula.constants}\n"
+            f"  source: \"{custom_formula.source_text}\""
+        )
+    elif formula_method == "default":
+        context_parts.append(
+            "Note: No custom emission formula was found in the uploaded documents. "
+            "Calculations use the default formula: "
+            "total_CO2 = electricity_consumption * electricity_factor + natural_gas_consumption * natural_gas_factor."
+        )
+
+    # Collect emission factors found across all documents (session-wide)
+    doc_factors = getattr(session, "document_emission_factors", {})
+    if doc_factors:
+        factor_lines = []
+        for doc_id, factors in doc_factors.items():
+            doc = (getattr(session, "documents", {}) or {}).get(doc_id)
+            fname = doc.filename if doc else doc_id
+            for key, val in factors.items():
+                factor_lines.append(f"  {key}: {val} (from {fname})")
+        context_parts.append("Emission factors extracted from uploaded documents:\n" + "\n".join(factor_lines))
+
     for item in (result.get("structured_results") or [])[:5]:
         data = item.get("data") or {}
         district = data.get("district")
@@ -46,6 +75,12 @@ def stream_chat_response(
             parts.append(f"electricity_emission={data['electricity_emission']:,.2f}")
         if data.get("growth") is not None:
             parts.append(f"growth={float(data['growth']) * 100:.1f}%")
+        factors_used = data.get("emission_factors_used") or {}
+        factors_src = data.get("emission_factors_source") or {}
+        if factors_used:
+            for key, val in factors_used.items():
+                src = factors_src.get(key, "reference")
+                parts.append(f"{key}_factor={val} (source: {src})")
         context_parts.append(", ".join(parts))
 
     context = "\n\n".join(context_parts)

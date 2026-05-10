@@ -69,6 +69,50 @@ async def status():
     }
 
 
+@app.get("/emission-factors")
+async def emission_factors():
+    """Return emission factors found in uploaded documents vs reference defaults."""
+    from rag_retrieval.data_engine import _load_reference_data
+
+    reference = _load_reference_data().get("emission_factors", {})
+    found: list[dict] = []
+    for doc_id, factors in _session.document_emission_factors.items():
+        doc = _session.documents.get(doc_id)
+        found.append({
+            "filename": doc.filename if doc else doc_id,
+            "factors": factors,
+        })
+
+    # Pick a live engine to show what is actually being applied
+    applied: dict = {}
+    for engine in _session.data_engines.values():
+        if engine is not None:
+            applied = {
+                k: {"value": v, "source": engine.emission_factors_source.get(k, "reference")}
+                for k, v in engine.emission_factors.items()
+            }
+            break
+
+    custom = None
+    if _session.custom_formula:
+        f = _session.custom_formula
+        custom = {
+            "expression": f.expression,
+            "constants": f.constants,
+            "variable_hints": f.variable_hints,
+            "confidence": f.confidence,
+            "source_text": f.source_text,
+        }
+
+    return {
+        "reference_defaults": reference,
+        "extracted_from_documents": found,
+        "applied_in_calculations": applied,
+        "custom_formula": custom,
+        "formula_extraction_method": _session.formula_extraction_method,
+    }
+
+
 @app.post("/upload")
 async def upload_files(files: list[UploadFile]):
     global _session, _uploaded_files

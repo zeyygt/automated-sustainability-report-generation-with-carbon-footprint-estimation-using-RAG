@@ -1,0 +1,11 @@
+Emission Factors Used in This Report
+=====================================
+
+The following emission factors are applied for all carbon footprint calculations
+in this sustainability report:
+
+  - Electricity emission factor: 0.99 kgCO2/kWh
+  - Natural gas emission factor: 3.50 kgCO2/m3
+
+These values reflect the regional grid emission intensity for Istanbul
+as published by the national energy authority for the 2024 reporting period.

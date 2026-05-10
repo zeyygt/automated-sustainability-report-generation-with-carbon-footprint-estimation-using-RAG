@@ -14,10 +14,17 @@ from .text import normalize_for_search
 class DataEngine:
     """Compute deterministic insights from Excel, PDF table, or extracted fact DataFrames."""
 
-    def __init__(self, dataframe):
+    def __init__(self, dataframe, emission_factors: dict | None = None, custom_formula=None):
         self.pd = _import_pandas()
         self.reference_data = _load_reference_data()
-        self.emission_factors = self.reference_data.get("emission_factors", {})
+        base_factors: dict = dict(self.reference_data.get("emission_factors", {}))
+        doc_factors: dict = dict(emission_factors or {})
+        self.emission_factors = {**base_factors, **doc_factors}
+        self.emission_factors_source: dict[str, str] = {
+            key: ("document" if key in doc_factors else "reference")
+            for key in self.emission_factors
+        }
+        self.custom_formula = custom_formula  # ExtractedFormula | None
         self.district_population = self.reference_data.get("districts", {})
         self.avg_household_size = self.reference_data.get("avg_household_size")
         self.baseline_year = self.reference_data.get("baseline_year")
@@ -69,9 +76,13 @@ class DataEngine:
 
         electricity_emission = electricity * self._emission_factor("electricity")
         gas_emission = gas * self._emission_factor("natural_gas")
-        total_emission = electricity_emission + gas_emission
-        if total_emission == 0.0 and direct_emissions:
-            total_emission = direct_emissions
+
+        if self.custom_formula:
+            total_emission = self._eval_custom_formula(electricity, gas, direct_emissions)
+        else:
+            total_emission = electricity_emission + gas_emission
+            if total_emission == 0.0 and direct_emissions:
+                total_emission = direct_emissions
         population = self._population_for_district(district)
         household_count = self._safe_divide(population, self.avg_household_size) if population is not None else None
         growth = self._growth_for_rows(district_rows)
@@ -103,7 +114,46 @@ class DataEngine:
             "per_household": self._safe_divide(total_emission, household_count),
             "growth": growth,
             "warnings": warnings,
+            "emission_factors_used": dict(self.emission_factors),
+            "emission_factors_source": dict(self.emission_factors_source),
+            "formula_expression": self.custom_formula.expression if self.custom_formula else None,
+            "formula_source": self.custom_formula.source_text if self.custom_formula else None,
         }
+
+    def _eval_custom_formula(self, electricity: float, gas: float, direct_emissions: float) -> float:
+        """Evaluate the LLM-extracted formula. Falls back to default sum on any error."""
+        from .llm_formula_extractor import safe_eval
+
+        variables: dict[str, float] = {
+            # consumption aliases
+            "electricity": electricity,
+            "electricity_consumption": electricity,
+            "gas": gas,
+            "natural_gas": gas,
+            "natural_gas_consumption": gas,
+            "direct_emissions": direct_emissions,
+            # emission factor aliases
+            "electricity_factor": self._emission_factor("electricity"),
+            "electricity_emission_factor": self._emission_factor("electricity"),
+            "gas_factor": self._emission_factor("natural_gas"),
+            "natural_gas_factor": self._emission_factor("natural_gas"),
+            "gas_emission_factor": self._emission_factor("natural_gas"),
+            # constants declared in the formula doc
+            **self.custom_formula.constants,
+        }
+        # Default any remaining variables named in the formula to 0.0 so the
+        # formula evaluates even when the data has no matching column (e.g. renewable).
+        for var in self.custom_formula.variable_hints:
+            if var not in variables:
+                variables[var] = 0.0
+
+        try:
+            result = safe_eval(self.custom_formula.expression, variables)
+            return float(result)
+        except Exception:
+            # fall back to the default formula
+            default = electricity * self._emission_factor("electricity") + gas * self._emission_factor("natural_gas")
+            return default if default != 0.0 else direct_emissions
 
     def districts(self) -> list[str]:
         if self.dataframe.empty or not self.district_column:
