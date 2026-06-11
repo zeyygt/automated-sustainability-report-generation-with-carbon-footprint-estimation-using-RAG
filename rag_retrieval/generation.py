@@ -236,6 +236,12 @@ def _public_coverage_notes(warnings: list[str], language: str) -> list[str]:
             if english
             else "Doğrudan raporlanan emisyon değerleri çift sayımı önlemek için ayrı değerlendirilmiştir."
         )
+    if "custom_formula_missing_variable_definition" in joined or "custom_formula_missing_variable_value" in joined:
+        notes.append(
+            "A custom emissions formula was provided but could not be fully applied because some required variables were undefined or missing, so the standard calculation remained in use."
+            if english
+            else "Özel bir emisyon formülü sağlandı; ancak bazı gerekli değişkenler tanımlı olmadığı veya eksik olduğu için standart hesap yöntemi kullanılmaya devam edildi."
+        )
     return notes
 
 

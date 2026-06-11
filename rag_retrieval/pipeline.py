@@ -2,53 +2,27 @@
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .router import route_query
+from .text import normalize_for_search
 
 if TYPE_CHECKING:
     from .models import Query
     from .session import RetrievalSession
 
 
-KNOWN_DISTRICTS = {
-    "adalar": "Adalar",
-    "arnavutkoy": "Arnavutkoy",
-    "atasehir": "Atasehir",
-    "avcilar": "Avcilar",
-    "bagcilar": "Bagcilar",
-    "bahcelievler": "Bahcelievler",
-    "bakirkoy": "Bakirkoy",
-    "basaksehir": "Basaksehir",
-    "bayrampasa": "Bayrampasa",
-    "besiktas": "Besiktas",
-    "beykoz": "Beykoz",
-    "beylikduzu": "Beylikduzu",
-    "beyoglu": "Beyoglu",
-    "buyukcekmece": "Buyukcekmece",
-    "catalca": "Catalca",
-    "cekmekoy": "Cekmekoy",
-    "esenler": "Esenler",
-    "eyupsultan": "Eyupsultan",
-    "fatih": "Fatih",
-    "gaziosmanpasa": "Gaziosmanpasa",
-    "kadikoy": "Kadikoy",
-    "kagithane": "Kagithane",
-    "kartal": "Kartal",
-    "kucukcekmece": "Kucukcekmece",
-    "maltepe": "Maltepe",
-    "pendik": "Pendik",
-    "sancaktepe": "Sancaktepe",
-    "sariyer": "Sariyer",
-    "silivri": "Silivri",
-    "sisli": "Sisli",
-    "sultanbeyli": "Sultanbeyli",
-    "sultangazi": "Sultangazi",
-    "tuzla": "Tuzla",
-    "umraniye": "Umraniye",
-    "uskudar": "Uskudar",
-    "zeytinburnu": "Zeytinburnu",
+_DISTRICT_ALIAS_OVERRIDES = {
+    "eyup": "Eyupsultan",
+    "eyup sultan": "Eyupsultan",
+    "gaziosman pasa": "Gaziosmanpasa",
+    "kucuk cekmece": "Kucukcekmece",
+    "buyuk cekmece": "Buyukcekmece",
 }
+KNOWN_DISTRICTS = {}
 
 
 def handle_query(query_text: str, session: "RetrievalSession") -> dict:
@@ -72,10 +46,17 @@ def handle_query(query_text: str, session: "RetrievalSession") -> dict:
 
 
 def extract_district(query: "Query") -> str | None:
-    for term in query.terms:
-        if term in KNOWN_DISTRICTS:
-            return KNOWN_DISTRICTS[term]
+    aliases = known_districts()
+    terms = tuple(query.terms or ())
+    for candidate in _district_candidates(terms):
+        if candidate in aliases:
+            return aliases[candidate]
     return None
+
+
+def known_districts() -> dict[str, str]:
+    """Return normalized district aliases loaded from reference data."""
+    return dict(_known_district_aliases())
 
 
 def analyze_data_engines(session: "RetrievalSession", district: str | None, source_hints=()) -> list[dict]:
@@ -259,3 +240,57 @@ def _source_type_from_metadata(metadata: dict) -> str:
     if filename.endswith(".pdf"):
         return "pdf"
     return metadata.get("source_type") or "unknown"
+
+
+@lru_cache(maxsize=1)
+def _known_district_aliases() -> dict[str, str]:
+    path = Path(__file__).resolve().parent / "reference_Data.json"
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    aliases: dict[str, str] = {}
+    for district in data.get("districts", {}):
+        aliases.update(_district_aliases_for_name(str(district)))
+    for alias, district in _DISTRICT_ALIAS_OVERRIDES.items():
+        aliases[normalize_for_search(alias)] = district
+    return aliases
+
+
+def _district_aliases_for_name(district: str) -> dict[str, str]:
+    normalized = normalize_for_search(district)
+    compact = normalized.replace(" ", "")
+    tokens = tuple(token for token in normalized.split() if token)
+    values = {
+        normalized: district,
+        compact: district,
+    }
+    if len(tokens) > 1:
+        values[" ".join(tokens)] = district
+    return values
+
+
+def _district_candidates(terms: tuple[str, ...]) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        normalized = normalize_for_search(value)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+        compact = normalized.replace(" ", "")
+        if compact and compact not in seen:
+            seen.add(compact)
+            candidates.append(compact)
+
+    for size in range(min(3, len(terms)), 0, -1):
+        for index in range(len(terms) - size + 1):
+            phrase = " ".join(terms[index : index + size])
+            add(phrase)
+    return candidates
+
+
+KNOWN_DISTRICTS = known_districts()

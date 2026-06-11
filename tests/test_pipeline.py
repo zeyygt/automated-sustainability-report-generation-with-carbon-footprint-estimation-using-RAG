@@ -65,6 +65,16 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(extract_district(query), "Kadikoy")
 
+    def test_extract_district_supports_reference_only_districts(self):
+        query = make_query(terms=("esenyurt", "emissions"))
+
+        self.assertEqual(extract_district(query), "Esenyurt")
+
+    def test_extract_district_supports_spaced_aliases(self):
+        query = make_query(terms=("kucuk", "cekmece", "electricity"))
+
+        self.assertEqual(extract_district(query), "Kucukcekmece")
+
     def test_handle_query_excel_route_uses_data_engine(self):
         query = make_query(terms=("adalar",), intents=("numeric",))
         engine = FakeEngine()

@@ -5,16 +5,24 @@ from __future__ import annotations
 import json
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .text import normalize_for_search
+from .text import normalize_for_search, search_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class FormulaBinding:
+    kind: str
+    reference: str | tuple[str, ...] | float
+    hint: str = ""
 
 
 class DataEngine:
     """Compute deterministic insights from Excel, PDF table, or extracted fact DataFrames."""
 
-    def __init__(self, dataframe, emission_factors: dict | None = None, custom_formula=None):
+    def __init__(self, dataframe, emission_factors: dict | None = None, custom_formula=None, custom_formula_inputs=None):
         self.pd = _import_pandas()
         self.reference_data = _load_reference_data()
         base_factors: dict = dict(self.reference_data.get("emission_factors", {}))
@@ -25,6 +33,7 @@ class DataEngine:
             for key in self.emission_factors
         }
         self.custom_formula = custom_formula  # ExtractedFormula | None
+        self.custom_formula_inputs = dict(custom_formula_inputs or {})
         self.district_population = self.reference_data.get("districts", {})
         self.avg_household_size = self.reference_data.get("avg_household_size")
         self.baseline_year = self.reference_data.get("baseline_year")
@@ -38,6 +47,11 @@ class DataEngine:
         self.unit_column = self._detect_unit_column()
         self.time_column = self._detect_time_column()
         self.growth_rate_column = self._detect_growth_rate_column()
+        self.custom_formula_bindings: dict[str, FormulaBinding] = {}
+        self.custom_formula_bound_variables: dict[str, str] = {}
+        self.custom_formula_missing_variables: list[str] = []
+        self.custom_formula_status: str = "default"
+        self._configure_custom_formula()
 
     def analyze_district(self, district: str) -> dict:
         if self.dataframe.empty or not self.district_column:
@@ -77,12 +91,28 @@ class DataEngine:
         electricity_emission = electricity * self._emission_factor("electricity")
         gas_emission = gas * self._emission_factor("natural_gas")
 
+        formula_status = "default"
+        formula_missing_values: list[str] = []
+        formula_warnings: list[str] = []
         if self.custom_formula:
-            total_emission = self._eval_custom_formula(electricity, gas, direct_emissions)
+            if self.custom_formula_status == "ready":
+                total_emission, formula_status, formula_missing_values, formula_warnings = self._eval_custom_formula(
+                    district_rows,
+                    electricity,
+                    gas,
+                    direct_emissions,
+                )
+            else:
+                total_emission = self._default_total_emission(electricity, gas, direct_emissions)
+                formula_status = "custom_incomplete"
+                formula_warnings.extend(
+                    [
+                        f"custom_formula_missing_variable_definition:{name}"
+                        for name in self.custom_formula_missing_variables
+                    ]
+                )
         else:
-            total_emission = electricity_emission + gas_emission
-            if total_emission == 0.0 and direct_emissions:
-                total_emission = direct_emissions
+            total_emission = self._default_total_emission(electricity, gas, direct_emissions)
         population = self._population_for_district(district)
         household_count = self._safe_divide(population, self.avg_household_size) if population is not None else None
         growth = self._growth_for_rows(district_rows)
@@ -103,6 +133,7 @@ class DataEngine:
             population=population,
             household_count=household_count,
         )
+        warnings.extend(formula_warnings)
 
         return {
             "district": str(district_rows[self.district_column].iloc[0]),
@@ -118,10 +149,14 @@ class DataEngine:
             "emission_factors_source": dict(self.emission_factors_source),
             "formula_expression": self.custom_formula.expression if self.custom_formula else None,
             "formula_source": self.custom_formula.source_text if self.custom_formula else None,
+            "formula_status": formula_status,
+            "formula_missing_variables": list(self.custom_formula_missing_variables),
+            "formula_missing_values": formula_missing_values,
+            "formula_bound_variables": dict(self.custom_formula_bound_variables),
         }
 
-    def _eval_custom_formula(self, electricity: float, gas: float, direct_emissions: float) -> float:
-        """Evaluate the LLM-extracted formula. Falls back to default sum on any error."""
+    def _eval_custom_formula(self, rows, electricity: float, gas: float, direct_emissions: float) -> tuple[float, str, list[str], list[str]]:
+        """Evaluate the LLM-extracted formula with explicit variable validation."""
         from .llm_formula_extractor import safe_eval
 
         variables: dict[str, float] = {
@@ -141,19 +176,257 @@ class DataEngine:
             # constants declared in the formula doc
             **self.custom_formula.constants,
         }
-        # Default any remaining variables named in the formula to 0.0 so the
-        # formula evaluates even when the data has no matching column (e.g. renewable).
-        for var in self.custom_formula.variable_hints:
-            if var not in variables:
-                variables[var] = 0.0
+
+        missing_values: list[str] = []
+        for var, binding in self.custom_formula_bindings.items():
+            value, has_value = self._formula_binding_value(rows, binding)
+            variables[var] = value
+            if not has_value:
+                missing_values.append(var)
+
+        if missing_values:
+            return (
+                self._default_total_emission(electricity, gas, direct_emissions),
+                "custom_missing_values_fallback",
+                missing_values,
+                [f"custom_formula_missing_variable_value:{name}" for name in missing_values],
+            )
 
         try:
             result = safe_eval(self.custom_formula.expression, variables)
-            return float(result)
-        except Exception:
-            # fall back to the default formula
-            default = electricity * self._emission_factor("electricity") + gas * self._emission_factor("natural_gas")
-            return default if default != 0.0 else direct_emissions
+            return float(result), "custom_applied", [], []
+        except Exception as exc:
+            return (
+                self._default_total_emission(electricity, gas, direct_emissions),
+                "custom_runtime_fallback",
+                [],
+                [f"custom_formula_runtime_error:{type(exc).__name__}"],
+            )
+
+    def _configure_custom_formula(self) -> None:
+        self.custom_formula_bindings = {}
+        self.custom_formula_bound_variables = {}
+        self.custom_formula_missing_variables = []
+        self.custom_formula_status = "default"
+        if not self.custom_formula:
+            return
+
+        try:
+            from .llm_formula_extractor import extract_formula_variables
+
+            referenced = extract_formula_variables(self.custom_formula.expression)
+        except ValueError:
+            self.custom_formula_status = "invalid"
+            self.custom_formula_missing_variables = ["invalid_expression"]
+            return
+
+        for variable in sorted(referenced):
+            if variable in self.custom_formula_inputs:
+                binding = self._binding_from_user_input(variable, self.custom_formula_inputs[variable])
+                if binding is not None:
+                    self.custom_formula_bindings[variable] = binding
+                    self.custom_formula_bound_variables[variable] = self._binding_label(binding)
+                    continue
+            if variable in self.custom_formula.constants:
+                self.custom_formula_bound_variables[variable] = "constant"
+                continue
+            if variable in self._builtin_formula_variables():
+                self.custom_formula_bound_variables[variable] = "builtin"
+                continue
+
+            hint = str(self.custom_formula.variable_hints.get(variable, "") or "")
+            binding = self._find_formula_binding(variable, hint)
+            if binding is None:
+                self.custom_formula_missing_variables.append(variable)
+                continue
+            self.custom_formula_bindings[variable] = binding
+            self.custom_formula_bound_variables[variable] = self._binding_label(binding)
+
+        self.custom_formula_status = "ready" if not self.custom_formula_missing_variables else "incomplete"
+
+    def _builtin_formula_variables(self) -> set[str]:
+        return {
+            "electricity",
+            "electricity_consumption",
+            "gas",
+            "gas_factor",
+            "gas_emission_factor",
+            "natural_gas",
+            "natural_gas_consumption",
+            "natural_gas_factor",
+            "direct_emissions",
+            "electricity_factor",
+            "electricity_emission_factor",
+        }
+
+    def _find_formula_binding(self, variable_name: str, hint: str) -> FormulaBinding | None:
+        column = self._match_formula_column(variable_name, hint)
+        if column:
+            return FormulaBinding(kind="column", reference=column, hint=hint)
+
+        search_terms = self._formula_search_terms(variable_name, hint)
+        if self._metric_has_formula_match(search_terms):
+            return FormulaBinding(kind="metric", reference=tuple(search_terms), hint=hint)
+        return None
+
+    def _binding_from_user_input(self, variable_name: str, user_input: dict[str, object]) -> FormulaBinding | None:
+        kind = normalize_for_search(user_input.get("type", "")).replace(" ", "_")
+        if kind == "constant":
+            try:
+                value = float(user_input.get("value"))
+            except (TypeError, ValueError):
+                return None
+            return FormulaBinding(kind="constant", reference=value, hint=f"user_input:{variable_name}")
+
+        if kind == "column":
+            column_name = str(user_input.get("column", "") or "")
+            resolved = self._resolve_formula_column_reference(column_name)
+            if resolved:
+                return FormulaBinding(kind="column", reference=resolved, hint=f"user_input:{variable_name}")
+        return None
+
+    def _match_formula_column(self, variable_name: str, hint: str) -> str | None:
+        target = normalize_for_search(variable_name).replace(" ", "_").strip("_")
+        target_compact = target.replace("_", "")
+        target_tokens = {token for token in target.split("_") if token}
+        hint_tokens = {token for token in self._formula_search_terms(variable_name, hint) if token}
+        skip_columns = {
+            self.district_column,
+            self.metric_column,
+            self.unit_column,
+            self.time_column,
+        }
+        best_column: str | None = None
+        best_score = 0.0
+
+        for column in self.dataframe.columns:
+            if column in skip_columns or self._numeric_ratio(column) <= 0:
+                continue
+
+            column_norm = normalize_for_search(column).replace(" ", "_")
+            column_compact = column_norm.replace("_", "")
+            column_tokens = {token for token in column_norm.split("_") if token}
+            score = 0.0
+
+            if target and column_norm == target:
+                score += 10.0
+            if target_compact and column_compact == target_compact:
+                score += 9.0
+            if target and target in column_norm:
+                score += 6.0
+
+            if target_tokens:
+                overlap = len(target_tokens & column_tokens)
+                if overlap == len(target_tokens):
+                    score += 5.0
+                elif overlap:
+                    score += 2.0 * (overlap / len(target_tokens))
+
+            if hint_tokens:
+                hint_overlap = len(hint_tokens & column_tokens)
+                if hint_overlap:
+                    score += 1.5 * (hint_overlap / len(hint_tokens))
+
+            if score > best_score:
+                best_column = column
+                best_score = score
+
+        return best_column if best_score >= 5.0 else None
+
+    def _resolve_formula_column_reference(self, column_name: str) -> str | None:
+        target = normalize_for_search(column_name).replace(" ", "_").strip("_")
+        target_compact = target.replace("_", "")
+        if not target:
+            return None
+
+        for column in self.dataframe.columns:
+            column_norm = normalize_for_search(column).replace(" ", "_").strip("_")
+            if column_norm == target or column_norm.replace("_", "") == target_compact:
+                return str(column)
+        return None
+
+    def _formula_search_terms(self, variable_name: str, hint: str) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        for raw in [variable_name.replace("_", " "), hint]:
+            for token in search_tokens(raw):
+                if token in {"in", "the", "of", "and", "or", "per", "unit"}:
+                    continue
+                if token not in seen:
+                    seen.add(token)
+                    terms.append(token)
+        return terms
+
+    def _metric_has_formula_match(self, search_terms: list[str]) -> bool:
+        if not search_terms or not self.metric_column or self.metric_column not in self.dataframe.columns:
+            return False
+        metric_values = self.dataframe[self.metric_column].dropna().astype(str).map(normalize_for_search)
+        return any(self._metric_matches_terms(value, tuple(search_terms)) for value in metric_values)
+
+    def _metric_matches_terms(self, metric_value: str, search_terms: tuple[str, ...]) -> bool:
+        metric_tokens = set(search_tokens(metric_value))
+        term_set = {term for term in search_terms if term}
+        if not term_set:
+            return False
+        if " ".join(search_terms) in metric_value:
+            return True
+        overlap = len(term_set & metric_tokens)
+        return overlap > 0 and overlap / len(term_set) >= 0.5
+
+    def _formula_binding_value(self, rows, binding: FormulaBinding) -> tuple[float, bool]:
+        if binding.kind == "constant":
+            return float(binding.reference), True
+
+        if binding.kind == "column":
+            values = self._numeric_series(rows[binding.reference]).dropna()
+            if values.empty:
+                return 0.0, False
+            return float(values.sum()), True
+
+        if binding.kind == "metric":
+            return self._sum_metric_terms(rows, binding.reference)
+
+        return 0.0, False
+
+    def _sum_metric_terms(self, rows, search_terms: tuple[str, ...]) -> tuple[float, bool]:
+        if (
+            not self.metric_column
+            or self.metric_column not in rows.columns
+            or not self.value_column
+            or self.value_column not in rows.columns
+        ):
+            return 0.0, False
+
+        metric_values = rows[self.metric_column].astype(str).map(normalize_for_search)
+        mask = metric_values.apply(lambda value: self._metric_matches_terms(value, search_terms))
+        if not mask.any():
+            return 0.0, False
+
+        values = self._numeric_series(rows.loc[mask, self.value_column]).dropna()
+        if values.empty:
+            return 0.0, False
+
+        if self.unit_column and self.unit_column in rows.columns:
+            units = rows.loc[mask, self.unit_column].astype(str).map(
+                lambda value: normalize_for_search(value).replace(" ", "")
+            )
+            values = values.where(units != "mwh", values * 1000)
+        return float(values.sum()), True
+
+    @staticmethod
+    def _binding_label(binding: FormulaBinding) -> str:
+        if binding.kind == "constant":
+            return "user_constant"
+        if binding.kind == "column":
+            return f"column:{binding.reference}"
+        if binding.kind == "metric":
+            return f"metric:{','.join(binding.reference)}"
+        return binding.kind
+
+    def _default_total_emission(self, electricity: float, gas: float, direct_emissions: float) -> float:
+        total = electricity * self._emission_factor("electricity") + gas * self._emission_factor("natural_gas")
+        return total if total != 0.0 else direct_emissions
 
     def districts(self) -> list[str]:
         if self.dataframe.empty or not self.district_column:
@@ -182,6 +455,22 @@ class DataEngine:
             "lowest_district": str(lowest_district),
             "lowest_value": float(grouped.loc[lowest_district]),
         }
+
+    def formula_candidate_columns(self) -> list[str]:
+        skip_columns = {
+            self.district_column,
+            self.metric_column,
+            self.unit_column,
+            self.time_column,
+        }
+        candidates = []
+        for column in self.dataframe.columns:
+            if column in skip_columns:
+                continue
+            if self._numeric_ratio(column) <= 0:
+                continue
+            candidates.append(str(column))
+        return sorted(set(candidates))
 
     def _detect_district_column(self) -> str | None:
         preferred_terms = ("district", "ilce", "region", "city", "location", "site", "facility", "municipality")

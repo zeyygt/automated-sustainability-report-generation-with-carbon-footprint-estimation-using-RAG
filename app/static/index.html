@@ -155,6 +155,18 @@
     </div>
   </header>
 
+  <section id="session-alert" class="hidden flex-shrink-0 border-b border-[#ead7b1] bg-[#fff7e8]">
+    <div class="px-6 py-4 flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <p id="session-alert-title" class="text-[13px] font-semibold text-[#8a5a00]">Supporting data required</p>
+        <p id="session-alert-body" class="mt-1 text-[13px] leading-5 text-[#6b4b00]"></p>
+      </div>
+      <button id="session-alert-action" onclick="openSupportingDataPicker()" class="shrink-0 rounded-lg border border-[#d6b06a] bg-white px-3 py-2 text-[12px] font-semibold text-[#8a5a00] hover:bg-[#fff3d6] transition-colors">
+        Upload Data
+      </button>
+    </div>
+  </section>
+
   <!-- Drop Overlay -->
   <div id="drop-overlay" class="absolute inset-0 z-30 bg-[#22577a]/80 flex flex-col items-center justify-center gap-4 pointer-events-none rounded-lg m-2">
     <span class="material-symbols-outlined text-white text-6xl">upload_file</span>
@@ -253,17 +265,53 @@
   </div>
 </aside>
 
+<div id="formula-resolver-modal" class="hidden fixed inset-0 z-[70] bg-black/40 px-4 py-8">
+  <div class="mx-auto flex h-full w-full max-w-3xl items-center justify-center">
+    <div class="flex max-h-full w-full flex-col overflow-hidden rounded-xl border border-[#d9e2ec] bg-white shadow-xl">
+      <div class="flex items-start justify-between gap-4 border-b border-[#d9e2ec] px-6 py-5">
+        <div>
+          <h3 class="text-[18px] font-semibold text-primary">Resolve Formula Inputs</h3>
+          <p class="mt-1 text-[13px] text-outline">Provide each missing variable as a constant or map it to a numeric data column.</p>
+        </div>
+        <button onclick="closeFormulaResolver()" class="text-outline hover:text-error transition-colors">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div id="formula-resolver-body" class="overflow-y-auto px-6 py-5"></div>
+      <div class="flex items-center justify-between gap-3 border-t border-[#d9e2ec] bg-[#f7fafc] px-6 py-4">
+        <p class="text-[12px] text-outline">Constant values apply to every district in the generated report.</p>
+        <div class="flex items-center gap-3">
+          <button onclick="closeFormulaResolver()" class="rounded-lg border border-[#d9e2ec] px-4 py-2 text-[13px] font-medium text-primary hover:bg-white transition-colors">
+            Cancel
+          </button>
+          <button id="formula-resolver-save" onclick="saveFormulaInputs()" class="rounded-lg bg-secondary px-4 py-2 text-[13px] font-semibold text-white hover:opacity-90 transition-opacity">
+            Save Inputs
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── State ──────────────────────────────────────────────────────────────────
   let currentLanguage = 'English';
   let pendingFiles = [];
   let reportData = null;
   let panelOpen = false;
+  let sessionDiagnostics = {
+    report_generation_status: 'ready',
+    report_generation_warnings: [],
+    has_structured_data: false,
+    structured_district_count: 0,
+    custom_formula: null,
+  };
 
   // ── Init ───────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', () => {
     setupDragDrop();
     marked.setOptions({ breaks: true, gfm: true });
+    updateGenerateButtonState();
   });
 
   // ── Language ───────────────────────────────────────────────────────────────
@@ -323,14 +371,28 @@
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       updateFileList(data.files, true);
+      await refreshSessionDiagnostics();
       setStatus('ready', 'Ready');
       const names = data.files.map(f => `**${f.name}**`).join(', ');
       const chunkNote = data.stats.chunk_count > 0
         ? `_Indexed ${data.stats.chunk_count} text chunks in ${data.stats.elapsed_seconds}s._`
         : `_Spreadsheet parsed and ready for district analysis in ${data.stats.elapsed_seconds}s._`;
-      addAssistantMessage(
-        `I've indexed ${names}. You can now ask questions about it or click **Generate Report** to create a full sustainability report.\n\n${chunkNote}`
-      );
+      if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+        addAssistantMessage(
+          `I've indexed ${names} and found a custom emissions formula, but there is no district-level data to apply it to yet.\n\n` +
+          `Upload a spreadsheet or a PDF with parseable district data before generating the report.\n\n${chunkNote}`
+        );
+      } else if (sessionDiagnostics.report_generation_status === 'blocked_missing_formula_inputs') {
+        addAssistantMessage(
+          `I've indexed ${names} and found a custom emissions formula that still needs required inputs: ` +
+          `${sessionDiagnostics.custom_formula_missing_variables.join(', ')}.\n\n` +
+          `Open **Resolve Formula Inputs** to continue with report generation.\n\n${chunkNote}`
+        );
+      } else {
+        addAssistantMessage(
+          `I've indexed ${names}. You can now ask questions about it or click **Generate Report** to create a full sustainability report.\n\n${chunkNote}`
+        );
+      }
       hideEmptyState();
     } catch (e) {
       setStatus('ready', 'Ready');
@@ -439,10 +501,40 @@
       hideEmptyState();
       return;
     }
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+      openSupportingDataPicker();
+      addAssistantMessage(
+        '⚠️ I found a custom formula, but there is no district-level data to apply it to yet. Upload a spreadsheet or a data-bearing PDF to continue.'
+      );
+      hideEmptyState();
+      return;
+    }
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_formula_inputs') {
+      openFormulaResolver();
+      addAssistantMessage(
+        '⚠️ The custom formula is still missing required inputs. Resolve them before generating the report.'
+      );
+      hideEmptyState();
+      return;
+    }
     await generateReportFromChat(null);
   }
 
   async function generateReportFromChat(triggerMessage) {
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+      addAssistantMessage(
+        '⚠️ A custom formula was detected, but report generation is paused until you upload district-level data. Add a spreadsheet or a PDF with parseable data first.'
+      );
+      return;
+    }
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_formula_inputs') {
+      openFormulaResolver();
+      addAssistantMessage(
+        '⚠️ The custom formula is waiting for missing variable inputs. Resolve them first, then generate the report again.'
+      );
+      return;
+    }
+
     hideEmptyState();
     setStatus('generating', 'Generating report...');
     setGenerateBtnLoading(true);
@@ -566,6 +658,7 @@
     closePanel();
     document.getElementById('open-panel-btn').classList.add('hidden');
     setStatus('empty', 'No files uploaded');
+    resetSessionDiagnostics();
     showEmptyState();
   }
 
@@ -734,6 +827,217 @@
       const files = Array.from(e.dataTransfer.files).filter(f => f.name.match(/\.(pdf|xlsx|xlsm|csv)$/i));
       if (files.length) uploadFiles(files);
     });
+  }
+
+  async function refreshSessionDiagnostics() {
+    try {
+      const res = await fetch('/emission-factors');
+      if (!res.ok) return;
+      const data = await res.json();
+      sessionDiagnostics = data;
+      applySessionDiagnostics();
+    } catch (_) {}
+  }
+
+  function resetSessionDiagnostics() {
+    sessionDiagnostics = {
+      report_generation_status: 'ready',
+      report_generation_warnings: [],
+      has_structured_data: false,
+      structured_district_count: 0,
+      custom_formula: null,
+    };
+    applySessionDiagnostics();
+  }
+
+  function applySessionDiagnostics() {
+    const alertEl = document.getElementById('session-alert');
+    const titleEl = document.getElementById('session-alert-title');
+    const bodyEl = document.getElementById('session-alert-body');
+    const actionEl = document.getElementById('session-alert-action');
+
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+      titleEl.textContent = 'Supporting data required';
+      bodyEl.textContent = 'A custom emissions formula was found, but there is no district-level data to apply it to yet. Upload a spreadsheet or a PDF with parseable district data before generating the report.';
+      actionEl.textContent = 'Upload Data';
+      actionEl.onclick = openSupportingDataPicker;
+      alertEl.classList.remove('hidden');
+    } else if (sessionDiagnostics.report_generation_status === 'blocked_missing_formula_inputs') {
+      const missing = (sessionDiagnostics.custom_formula_missing_variables || []).join(', ');
+      titleEl.textContent = 'Formula inputs required';
+      bodyEl.textContent = `The custom emissions formula is missing required variables: ${missing}. Provide each variable as a constant or map it to a numeric column before generating the report.`;
+      actionEl.textContent = 'Resolve Inputs';
+      actionEl.onclick = openFormulaResolver;
+      alertEl.classList.remove('hidden');
+    } else {
+      alertEl.classList.add('hidden');
+      titleEl.textContent = 'Supporting data required';
+      bodyEl.textContent = '';
+      actionEl.textContent = 'Upload Data';
+      actionEl.onclick = openSupportingDataPicker;
+    }
+
+    updateGenerateButtonState();
+  }
+
+  function updateGenerateButtonState() {
+    const button = document.getElementById('generate-btn');
+    const icon = document.getElementById('generate-icon');
+    const text = document.getElementById('generate-text');
+
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+      button.className = 'w-full bg-[#a86600] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#a86600]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
+      icon.textContent = 'upload_file';
+      text.textContent = 'Upload Supporting Data';
+      return;
+    }
+
+    if (sessionDiagnostics.report_generation_status === 'blocked_missing_formula_inputs') {
+      button.className = 'w-full bg-[#875400] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#875400]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
+      icon.textContent = 'tune';
+      text.textContent = 'Resolve Formula Inputs';
+      return;
+    }
+
+    button.className = 'w-full bg-[#22577a] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#22577a]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
+    if (!button.disabled) {
+      icon.textContent = 'assessment';
+      text.textContent = 'Generate Report';
+    }
+  }
+
+  function openSupportingDataPicker() {
+    document.getElementById('sidebar-file-input').click();
+  }
+
+  function openFormulaResolver() {
+    renderFormulaResolver();
+    document.getElementById('formula-resolver-modal').classList.remove('hidden');
+  }
+
+  function closeFormulaResolver() {
+    document.getElementById('formula-resolver-modal').classList.add('hidden');
+  }
+
+  function renderFormulaResolver() {
+    const body = document.getElementById('formula-resolver-body');
+    const missing = sessionDiagnostics.custom_formula_missing_variables || [];
+    const hints = (sessionDiagnostics.custom_formula && sessionDiagnostics.custom_formula.variable_hints) || {};
+    const inputs = sessionDiagnostics.custom_formula_user_inputs || {};
+    const columns = sessionDiagnostics.formula_input_columns || [];
+
+    if (!missing.length) {
+      body.innerHTML = '<p class="text-[13px] text-outline">No missing variables remain.</p>';
+      return;
+    }
+
+    body.innerHTML = missing.map(variable => {
+      const hint = hints[variable] || 'No hint available.';
+      const current = inputs[variable] || {};
+      const currentType = current.type || 'constant';
+      const value = current.value != null ? String(current.value) : '';
+      const selectedColumn = current.column || '';
+      const columnOptions = ['<option value=\"\">Select a numeric column</option>']
+        .concat(columns.map(option => {
+          const selected = option.value === selectedColumn ? 'selected' : '';
+          const suffix = option.documents && option.documents.length ? ` (${option.documents.join(', ')})` : '';
+          return `<option value="${escHtml(option.value)}" ${selected}>${escHtml(option.label + suffix)}</option>`;
+        }))
+        .join('');
+
+      return `
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4 mb-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-[14px] font-semibold text-primary">${escHtml(variable)}</p>
+              <p class="mt-1 text-[12px] leading-5 text-outline">${escHtml(hint)}</p>
+            </div>
+            <div class="w-full max-w-[240px]">
+              <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Input type</label>
+              <select id="formula-type-${escHtml(variable)}" onchange="onFormulaInputTypeChange('${escHtml(variable)}')" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">
+                <option value="constant" ${currentType === 'constant' ? 'selected' : ''}>Constant value</option>
+                <option value="column" ${currentType === 'column' ? 'selected' : ''}>Spreadsheet column</option>
+              </select>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div id="formula-constant-wrap-${escHtml(variable)}" class="${currentType === 'constant' ? '' : 'hidden'}">
+              <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Constant value</label>
+              <input id="formula-value-${escHtml(variable)}" type="number" step="any" value="${escHtml(value)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface" placeholder="Enter a numeric value"/>
+            </div>
+            <div id="formula-column-wrap-${escHtml(variable)}" class="${currentType === 'column' ? '' : 'hidden'}">
+              <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Numeric column</label>
+              <select id="formula-column-${escHtml(variable)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">
+                ${columnOptions}
+              </select>
+            </div>
+          </div>
+        </section>`;
+    }).join('');
+  }
+
+  function onFormulaInputTypeChange(variable) {
+    const type = document.getElementById(`formula-type-${variable}`).value;
+    document.getElementById(`formula-constant-wrap-${variable}`).classList.toggle('hidden', type !== 'constant');
+    document.getElementById(`formula-column-wrap-${variable}`).classList.toggle('hidden', type !== 'column');
+  }
+
+  async function saveFormulaInputs() {
+    const missing = sessionDiagnostics.custom_formula_missing_variables || [];
+    const payload = { variables: {} };
+
+    for (const variable of missing) {
+      const type = document.getElementById(`formula-type-${variable}`).value;
+      if (type === 'constant') {
+        const rawValue = document.getElementById(`formula-value-${variable}`).value.trim();
+        if (!rawValue) {
+          alert(`Please enter a numeric value for ${variable}.`);
+          return;
+        }
+        const numericValue = Number(rawValue);
+        if (!Number.isFinite(numericValue)) {
+          alert(`Please enter a valid numeric value for ${variable}.`);
+          return;
+        }
+        payload.variables[variable] = { type: 'constant', value: numericValue };
+      } else {
+        const column = document.getElementById(`formula-column-${variable}`).value;
+        if (!column) {
+          alert(`Please select a column for ${variable}.`);
+          return;
+        }
+        payload.variables[variable] = { type: 'column', column };
+      }
+    }
+
+    const saveBtn = document.getElementById('formula-resolver-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+      const res = await fetch('/formula-inputs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to save formula inputs.');
+
+      sessionDiagnostics = data;
+      applySessionDiagnostics();
+      closeFormulaResolver();
+
+      if (sessionDiagnostics.report_generation_status === 'ready') {
+        addAssistantMessage('The missing formula inputs were saved. You can now generate the report using the completed custom formula.');
+      } else {
+        addAssistantMessage('I saved the provided formula inputs, but some variables are still unresolved across the uploaded data. Review the warning and adjust the mappings if needed.');
+      }
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Inputs';
+    }
   }
 </script>
 </body>

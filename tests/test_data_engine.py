@@ -1,6 +1,7 @@
 import unittest
 
 from rag_retrieval.data_engine import DataEngine
+from rag_retrieval.llm_formula_extractor import ExtractedFormula
 
 try:
     import pandas as pd
@@ -145,6 +146,120 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(result["top_value"], 30.0)
         self.assertEqual(result["lowest_district"], "B")
         self.assertEqual(result["lowest_value"], 5.0)
+
+    def test_custom_formula_applies_generic_column_binding(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Electricity Consumption (kWh)": 1000, "Natural Gas Consumption (m3)": 100, "Tree Count": 10},
+            ]
+        )
+        formula = ExtractedFormula(
+            expression="electricity * electricity_factor + natural_gas * natural_gas_factor - tree_count * tree_credit",
+            constants={"tree_credit": 2.0},
+            variable_hints={"tree_count": "number of trees"},
+            confidence="high",
+            source_text="Total = electricity * factor + natural_gas * factor - tree_count * tree_credit",
+        )
+
+        result = DataEngine(dataframe, custom_formula=formula).analyze_district("Kadikoy")
+
+        self.assertEqual(result["formula_status"], "custom_applied")
+        self.assertEqual(result["formula_missing_variables"], [])
+        self.assertEqual(result["formula_bound_variables"]["tree_count"], "column:tree_count")
+        self.assertEqual(result["total_emission"], 620.0)
+
+    def test_custom_formula_uses_metric_binding_when_column_is_not_present(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Metric": "Electricity Consumption", "Unit": "kWh", "Value": 1000},
+                {"District": "Kadikoy", "Metric": "Natural Gas Consumption", "Unit": "m3", "Value": 100},
+                {"District": "Kadikoy", "Metric": "Renewable Energy Generated", "Unit": "kWh", "Value": 400},
+            ]
+        )
+        formula = ExtractedFormula(
+            expression="electricity * electricity_factor + natural_gas * natural_gas_factor - renewable * renewable_offset",
+            constants={"renewable_offset": 0.05},
+            variable_hints={"renewable": "renewable energy generated in kWh"},
+            confidence="high",
+            source_text="Total = electricity * factor + natural_gas * factor - renewable * renewable_offset",
+        )
+
+        result = DataEngine(dataframe, custom_formula=formula).analyze_district("Kadikoy")
+
+        self.assertEqual(result["formula_status"], "custom_applied")
+        self.assertEqual(result["formula_bound_variables"]["renewable"], "metric:renewable,energy,generated,kwh")
+        self.assertEqual(result["total_emission"], 620.0)
+
+    def test_custom_formula_incomplete_definition_falls_back_to_default(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Electricity Consumption (kWh)": 1000, "Natural Gas Consumption (m3)": 100},
+            ]
+        )
+        formula = ExtractedFormula(
+            expression="electricity * electricity_factor + natural_gas * natural_gas_factor - renewable * renewable_offset",
+            constants={"renewable_offset": 0.05},
+            variable_hints={"renewable": "renewable energy generated in kWh"},
+            confidence="high",
+            source_text="Total = electricity * factor + natural_gas * factor - renewable * renewable_offset",
+        )
+
+        result = DataEngine(dataframe, custom_formula=formula).analyze_district("Kadikoy")
+
+        self.assertEqual(result["formula_status"], "custom_incomplete")
+        self.assertEqual(result["formula_missing_variables"], ["renewable"])
+        self.assertIn("custom_formula_missing_variable_definition:renewable", result["warnings"])
+        self.assertEqual(result["total_emission"], 640.0)
+
+    def test_custom_formula_user_constant_resolves_missing_variable(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Electricity Consumption (kWh)": 1000, "Natural Gas Consumption (m3)": 100},
+            ]
+        )
+        formula = ExtractedFormula(
+            expression="electricity * electricity_factor + natural_gas * natural_gas_factor - renewable * renewable_offset",
+            constants={"renewable_offset": 0.05},
+            variable_hints={"renewable": "renewable energy generated in kWh"},
+            confidence="high",
+            source_text="Total = electricity * factor + natural_gas * factor - renewable * renewable_offset",
+        )
+
+        result = DataEngine(
+            dataframe,
+            custom_formula=formula,
+            custom_formula_inputs={"renewable": {"type": "constant", "value": 400}},
+        ).analyze_district("Kadikoy")
+
+        self.assertEqual(result["formula_status"], "custom_applied")
+        self.assertEqual(result["formula_bound_variables"]["renewable"], "user_constant")
+        self.assertEqual(result["total_emission"], 620.0)
+
+    def test_custom_formula_user_column_mapping_overrides_automatic_miss(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Electricity Consumption (kWh)": 1000, "Natural Gas Consumption (m3)": 100, "Tree Count": 10},
+            ]
+        )
+        formula = ExtractedFormula(
+            expression="electricity * electricity_factor + natural_gas * natural_gas_factor - carbon_sink * sink_credit",
+            constants={"sink_credit": 2.0},
+            variable_hints={"carbon_sink": "custom sink total"},
+            confidence="high",
+            source_text="Total = electricity * factor + natural_gas * factor - carbon_sink * sink_credit",
+        )
+
+        unresolved = DataEngine(dataframe, custom_formula=formula).analyze_district("Kadikoy")
+        resolved = DataEngine(
+            dataframe,
+            custom_formula=formula,
+            custom_formula_inputs={"carbon_sink": {"type": "column", "column": "tree_count"}},
+        ).analyze_district("Kadikoy")
+
+        self.assertEqual(unresolved["formula_status"], "custom_incomplete")
+        self.assertEqual(resolved["formula_status"], "custom_applied")
+        self.assertEqual(resolved["formula_bound_variables"]["carbon_sink"], "column:tree_count")
+        self.assertEqual(resolved["total_emission"], 620.0)
 
 
 if __name__ == "__main__":

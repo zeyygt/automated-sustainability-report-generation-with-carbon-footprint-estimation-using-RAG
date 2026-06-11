@@ -35,6 +35,8 @@ def stream_chat_response(
     # Expose the formula extraction outcome so the assistant can reference it
     custom_formula = getattr(session, "custom_formula", None)
     formula_method = getattr(session, "formula_extraction_method", "default")
+    formula_status = getattr(session, "custom_formula_status", "default")
+    formula_missing = list(getattr(session, "custom_formula_missing_variables", []) or [])
     if custom_formula:
         context_parts.append(
             f"Custom emission formula extracted from documents "
@@ -43,6 +45,13 @@ def stream_chat_response(
             f"  constants: {custom_formula.constants}\n"
             f"  source: \"{custom_formula.source_text}\""
         )
+        if formula_status in {"incomplete", "partial"} and formula_missing:
+            context_parts.append(
+                "Important: the uploaded custom formula cannot be safely applied yet. "
+                f"Missing variables: {', '.join(formula_missing)}. "
+                "Ask the user to define each missing variable as either a spreadsheet column "
+                "or a fixed constant before relying on total emissions."
+            )
     elif formula_method == "default":
         context_parts.append(
             "Note: No custom emission formula was found in the uploaded documents. "
@@ -81,6 +90,12 @@ def stream_chat_response(
             for key, val in factors_used.items():
                 src = factors_src.get(key, "reference")
                 parts.append(f"{key}_factor={val} (source: {src})")
+        formula_item_status = data.get("formula_status")
+        if formula_item_status:
+            parts.append(f"formula_status={formula_item_status}")
+        missing_variables = data.get("formula_missing_variables") or []
+        if missing_variables:
+            parts.append(f"formula_missing_variables={','.join(missing_variables)}")
         context_parts.append(", ".join(parts))
 
     context = "\n\n".join(context_parts)

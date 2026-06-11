@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from .generation import _public_coverage_notes
 from .report_metrics import public_metrics
 from .report_models import GeneratedReport, ReportAssets
 
@@ -50,6 +51,16 @@ def discover_report_assets(base_dir: str | Path = ".") -> ReportAssets:
 
 
 def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
+    coverage_notes = _coverage_notes(report)
+    coverage_html = ""
+    if coverage_notes:
+        coverage_items = "".join(f"<li>{html.escape(note)}</li>" for note in coverage_notes)
+        coverage_html = (
+            "<section>"
+            "<h2>Coverage Notes</h2>"
+            f"<div class=\"warning\"><ul>{coverage_items}</ul></div>"
+            "</section>"
+        )
     chart_html = "\n".join(
         f"<section><h2>{html.escape(chart['title'])}</h2><img class=\"chart\" src=\"{html.escape(_image_src(chart['path']))}\" /></section>"
         for chart in report.charts
@@ -95,6 +106,8 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
     {_markdown_to_html(report.ai_content_markdown)}
   </section>
 
+  {coverage_html}
+
   {chart_html}
 
   <section>
@@ -137,6 +150,13 @@ def render_pdf(report: GeneratedReport, output_path: str | Path, assets: ReportA
     story.append(Spacer(1, 0.6 * cm))
 
     _append_markdown(story, report.ai_content_markdown, styles)
+    coverage_notes = _coverage_notes(report)
+    if coverage_notes:
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph("Coverage Notes", styles["Heading1"]))
+        for note in coverage_notes:
+            story.append(Paragraph(f"- {note}", styles["Normal"]))
+        story.append(Spacer(1, 0.2 * cm))
 
     if report.charts:
         story.append(PageBreak())
@@ -170,6 +190,10 @@ def _metric_rows(structured_results: Iterable[dict]) -> list[str]:
             "</tr>"
         )
     return rows
+
+
+def _coverage_notes(report: GeneratedReport) -> list[str]:
+    return _public_coverage_notes(report.report_input.warnings, report.language)
 
 
 def _metric_table(structured_results: list[dict], styles, small):

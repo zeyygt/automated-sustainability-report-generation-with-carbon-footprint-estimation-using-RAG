@@ -25,6 +25,20 @@ def generate_sustainability_report(
     model: str | None = None,
     reasoning_effort: str | None = None,
 ) -> GeneratedReport:
+    status = getattr(session, "report_generation_status", "ready")
+    if status == "blocked_missing_structured_data":
+        raise ValueError(
+            "A custom formula was detected, but no structured district data is available yet. "
+            "Upload a spreadsheet or a data-bearing PDF before generating the report."
+        )
+    if status == "blocked_missing_formula_inputs":
+        missing = ", ".join(getattr(session, "custom_formula_missing_variables", []) or [])
+        raise ValueError(
+            "A custom formula is waiting for required variable inputs"
+            + (f": {missing}." if missing else ".")
+            + " Resolve the missing variables before generating the report."
+        )
+
     output_path = Path(output_dir)
     charts_path = Path(chart_dir) if chart_dir else output_path / "charts"
     assets = assets or discover_report_assets()

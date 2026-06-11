@@ -119,6 +119,44 @@ class FormulaExtractorSpreadsheetTests(unittest.TestCase):
         # spreadsheet value wins
         self.assertAlmostEqual(result["electricity"], 0.60)
 
+    def test_extracts_factor_from_unit_bearing_metadata_cell(self):
+        df = pd.DataFrame(
+            [
+                {"field": "Emission Factor - Natural Gas", "value": "2.04 kgCO2e/m3"},
+            ]
+        )
+        result = self.extractor.extract_from_dataframe(df)
+        self.assertAlmostEqual(result["natural_gas"], 2.04)
+
+    def test_extracts_factor_from_textual_metadata_cell_with_year(self):
+        df = pd.DataFrame(
+            [
+                {"field": "Emission Factor - Electricity", "value": "Approved factor for 2024: 0.45"},
+            ]
+        )
+        result = self.extractor.extract_from_dataframe(df)
+        self.assertAlmostEqual(result["electricity"], 0.45)
+
+    def test_prefers_factor_candidate_over_trailing_version_number(self):
+        df = pd.DataFrame(
+            [
+                {"field": "Emission Factor - Electricity", "value": "Approved factor: 0.45 version 2.1"},
+            ]
+        )
+        result = self.extractor.extract_from_dataframe(df)
+        self.assertAlmostEqual(result["electricity"], 0.45)
+
+    def test_ignores_non_factor_metadata_rows_with_numbers(self):
+        df = pd.DataFrame(
+            [
+                {"field": "Report Year", "value": "2024"},
+                {"field": "District Count", "value": "39"},
+                {"field": "Version", "value": "version 2.1"},
+            ]
+        )
+        result = self.extractor.extract_from_dataframe(df)
+        self.assertEqual(result, {})
+
 
 @unittest.skipUnless(pd is not None, "pandas is not installed")
 class DataEngineEmissionFactorOverrideTests(unittest.TestCase):

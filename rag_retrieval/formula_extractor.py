@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from .models import ParsedDocument
+from .text import normalize_for_search
 
 
 # --- keyword helpers ---
@@ -68,6 +69,31 @@ _TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (_FACTOR_GAS_RE, "natural_gas"),
 ]
 
+_NUMBER_RE = re.compile(r"(?<![A-Za-z])(?P<value>\d[\d.,]*)(?![A-Za-z])")
+_FACTOR_CONTEXT_TERMS = (
+    "factor",
+    "emission factor",
+    "emisyon faktoru",
+    "emisyon faktor",
+    "approved factor",
+    "ef",
+)
+_FACTOR_UNIT_TERMS = (
+    "kgco2",
+    "kgco2e",
+    "tco2",
+    "tco2e",
+    "co2",
+    "kwh",
+    "mwh",
+    "m3",
+)
+_NON_FACTOR_HINT_TERMS = (
+    "version",
+    "report year",
+    "district count",
+)
+
 # Plausible range for emission factors (kgCO2/kWh or kgCO2/m³)
 _FACTOR_MIN = 0.001
 _FACTOR_MAX = 50.0
@@ -83,6 +109,66 @@ def _parse_float(text: str) -> float | None:
         return value if _FACTOR_MIN <= value <= _FACTOR_MAX else None
     except ValueError:
         return None
+
+
+def _extract_numeric_candidates(text: str) -> list[float]:
+    candidates: list[float] = []
+    for match in _NUMBER_RE.finditer(str(text)):
+        value = _parse_float(match.group("value"))
+        if value is not None:
+            candidates.append(value)
+    return candidates
+
+
+def _extract_factor_value(text: str) -> float | None:
+    raw_text = str(text)
+    best_value: float | None = None
+    best_score: float | None = None
+
+    for match in _NUMBER_RE.finditer(raw_text):
+        raw_value = match.group("value")
+        value = _parse_float(raw_value)
+        if value is None:
+            continue
+        score = _score_factor_candidate(raw_text, match.start("value"), match.end("value"), raw_value, value)
+        if best_score is None or score > best_score:
+            best_value = value
+            best_score = score
+
+    return best_value
+
+
+def _score_factor_candidate(text: str, start: int, end: int, raw_value: str, value: float) -> float:
+    before = normalize_for_search(text[max(0, start - 40) : start])
+    after = normalize_for_search(text[end : min(len(text), end + 40)])
+    window = normalize_for_search(text[max(0, start - 40) : min(len(text), end + 40)])
+    score = 0.0
+
+    if "." in raw_value or "," in raw_value:
+        score += 1.0
+    if value < 10.0:
+        score += 0.5
+
+    if any(term in before for term in _FACTOR_CONTEXT_TERMS):
+        score += 3.0
+    elif any(term in window for term in _FACTOR_CONTEXT_TERMS):
+        score += 1.5
+
+    if "=" in text[max(0, start - 6) : start] or ":" in text[max(0, start - 6) : start]:
+        score += 1.5
+
+    if any(term in after for term in _FACTOR_UNIT_TERMS):
+        score += 4.0
+    elif any(term in window for term in _FACTOR_UNIT_TERMS):
+        score += 1.0
+
+    if raw_value.isdigit() and 1900 <= value <= 2100:
+        score -= 5.0
+
+    if any(term in window for term in _NON_FACTOR_HINT_TERMS):
+        score -= 3.0
+
+    return score
 
 
 class FormulaExtractor:
@@ -141,7 +227,7 @@ def _scan_dataframe(df: Any) -> dict[str, float]:
 
     # --- scan rows ---
     for _, row in df.iterrows():
-        str_cells = [str(v).lower().strip() for v in row.values]
+        str_cells = [normalize_for_search(str(v).strip()) for v in row.values]
         combined = " ".join(str_cells)
 
         if not _has_factor(combined):
@@ -153,7 +239,7 @@ def _scan_dataframe(df: Any) -> dict[str, float]:
             continue
 
         for raw in row.values:
-            value = _parse_float(str(raw))
+            value = _extract_factor_value(str(raw))
             if value is None:
                 continue
             if has_elec and "electricity" not in factors:
@@ -163,13 +249,13 @@ def _scan_dataframe(df: Any) -> dict[str, float]:
 
     # --- scan column headers that signal emission factor ---
     for col in df.columns:
-        col_str = str(col).lower()
+        col_str = normalize_for_search(str(col))
         if not _has_factor(col_str):
             continue
         for idx in df.index:
-            idx_str = str(idx).lower()
+            idx_str = normalize_for_search(str(idx))
             try:
-                value = _parse_float(str(df.at[idx, col]))
+                value = _extract_factor_value(str(df.at[idx, col]))
                 if value is None:
                     continue
                 if _has_elec(idx_str) and "electricity" not in factors:

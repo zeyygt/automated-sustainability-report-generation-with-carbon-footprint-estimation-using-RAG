@@ -54,6 +54,16 @@ class ReportRequest(BaseModel):
     language: str = "English"
 
 
+class FormulaVariableInput(BaseModel):
+    type: str
+    value: float | None = None
+    column: str | None = None
+
+
+class FormulaInputRequest(BaseModel):
+    variables: dict[str, FormulaVariableInput]
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
@@ -108,9 +118,37 @@ async def emission_factors():
         "reference_defaults": reference,
         "extracted_from_documents": found,
         "applied_in_calculations": applied,
+        "factor_override_keys": list(getattr(_session, "factor_override_keys", []) or []),
         "custom_formula": custom,
         "formula_extraction_method": _session.formula_extraction_method,
+        "custom_formula_status": getattr(_session, "custom_formula_status", "default"),
+        "custom_formula_missing_variables": list(getattr(_session, "custom_formula_missing_variables", []) or []),
+        "custom_formula_validation": list(getattr(_session, "custom_formula_validation_by_document", []) or []),
+        "custom_formula_user_inputs": dict(getattr(_session, "custom_formula_user_inputs", {}) or {}),
+        "formula_input_columns": list(getattr(_session, "formula_input_columns", []) or []),
+        "has_structured_data": bool(getattr(_session, "has_structured_data", False)),
+        "structured_document_count": int(getattr(_session, "structured_document_count", 0) or 0),
+        "structured_district_count": int(getattr(_session, "structured_district_count", 0) or 0),
+        "report_generation_status": getattr(_session, "report_generation_status", "ready"),
+        "report_generation_warnings": list(getattr(_session, "report_generation_warnings", []) or []),
     }
+
+
+@app.post("/formula-inputs")
+async def formula_inputs(request: FormulaInputRequest):
+    if _session.custom_formula is None:
+        raise HTTPException(status_code=400, detail="No custom formula is available for resolution.")
+
+    try:
+        payload = {
+            name: value.model_dump(exclude_none=True)
+            for name, value in request.variables.items()
+        }
+        _session.update_custom_formula_inputs(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return await emission_factors()
 
 
 @app.post("/upload")
@@ -205,6 +243,8 @@ async def generate_report_endpoint(request: ReportRequest):
             language=request.language,
             output_dir=str(output_dir),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

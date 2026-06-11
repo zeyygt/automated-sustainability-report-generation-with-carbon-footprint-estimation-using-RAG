@@ -55,6 +55,17 @@ class RetrievalSession:
         self.document_emission_factors: dict[str, dict[str, float]] = {}
         self.custom_formula = None  # ExtractedFormula | None
         self.formula_extraction_method: str = "default"  # "direct" | "rag_assisted" | "default"
+        self.custom_formula_user_inputs: dict[str, dict[str, object]] = {}
+        self.custom_formula_status: str = "default"
+        self.custom_formula_missing_variables: list[str] = []
+        self.custom_formula_validation_by_document: list[dict[str, object]] = []
+        self.factor_override_keys: list[str] = []
+        self.formula_input_columns: list[dict[str, object]] = []
+        self.has_structured_data: bool = False
+        self.structured_document_count: int = 0
+        self.structured_district_count: int = 0
+        self.report_generation_status: str = "ready"
+        self.report_generation_warnings: list[str] = []
 
     def build_index(self, file_paths: Iterable[str | Path]) -> BuildStats:
         """Parse, chunk, embed, and index runtime uploads for this session."""
@@ -119,6 +130,7 @@ class RetrievalSession:
         session_factors: dict[str, float] = {}
         for factors in self.document_emission_factors.values():
             session_factors.update(factors)
+        self.factor_override_keys = sorted(session_factors)
 
         # ── Formula extraction: three-level fallback chain ────────────────────
         # Level 1: direct LLM extraction on all non-spreadsheet document text.
@@ -149,24 +161,15 @@ class RetrievalSession:
 
         if self.custom_formula is None:
             self.formula_extraction_method = "default"
+            self.custom_formula_status = "default"
 
-        # Pass 2: create DataEngines with session-level factors and custom formula.
-        for document in parsed_documents:
-            try:
-                dataframe = combine_dataframes(table_dfs[document.doc_id], fact_dfs[document.doc_id])
-            except ImportError:
-                dataframe = None
-
-            if dataframe is not None and not dataframe.empty:
-                self.data_engines[document.doc_id] = DataEngine(
-                    dataframe,
-                    emission_factors=session_factors or None,
-                    custom_formula=self.custom_formula,
-                )
-            else:
-                self.data_engines[document.doc_id] = None
+        # Pass 2: create or refresh DataEngines for every document in the session.
+        self._rebuild_data_engines()
         for chunk in chunks:
             self.chunks[chunk.chunk_id] = chunk
+        self._summarize_formula_validation()
+        self._summarize_formula_input_columns()
+        self._summarize_report_readiness()
 
         elapsed = time.perf_counter() - start
         return BuildStats(
@@ -195,6 +198,165 @@ class RetrievalSession:
         self.document_emission_factors.clear()
         self.custom_formula = None
         self.formula_extraction_method = "default"
+        self.custom_formula_user_inputs.clear()
+        self.custom_formula_status = "default"
+        self.custom_formula_missing_variables.clear()
+        self.custom_formula_validation_by_document.clear()
+        self.factor_override_keys.clear()
+        self.formula_input_columns.clear()
+        self.has_structured_data = False
+        self.structured_document_count = 0
+        self.structured_district_count = 0
+        self.report_generation_status = "ready"
+        self.report_generation_warnings.clear()
+
+    def update_custom_formula_inputs(self, variables: dict[str, dict[str, object]]) -> None:
+        if self.custom_formula is None:
+            raise ValueError("No custom formula is currently available to resolve.")
+
+        cleaned: dict[str, dict[str, object]] = {}
+        for variable, payload in (variables or {}).items():
+            name = str(variable).strip()
+            if not name:
+                continue
+            kind = str(payload.get("type", "")).strip().lower()
+            if kind == "constant":
+                try:
+                    value = float(payload.get("value"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Variable '{name}' requires a numeric constant value.") from exc
+                cleaned[name] = {"type": "constant", "value": value}
+            elif kind == "column":
+                column = str(payload.get("column", "") or "").strip()
+                if not column:
+                    raise ValueError(f"Variable '{name}' requires a column selection.")
+                cleaned[name] = {"type": "column", "column": column}
+            else:
+                raise ValueError(f"Variable '{name}' has an unsupported input type: {payload.get('type')!r}.")
+
+        self.custom_formula_user_inputs.update(cleaned)
+        self._rebuild_data_engines()
+        self._summarize_formula_validation()
+        self._summarize_formula_input_columns()
+        self._summarize_report_readiness()
+
+    def _summarize_formula_validation(self) -> None:
+        self.custom_formula_validation_by_document = []
+        self.custom_formula_missing_variables = []
+        if self.custom_formula is None:
+            self.custom_formula_status = "default"
+            return
+
+        seen_missing: set[str] = set()
+        statuses: list[str] = []
+        for doc_id, engine in self.data_engines.items():
+            if engine is None:
+                continue
+            document = self.documents.get(doc_id)
+            missing = list(getattr(engine, "custom_formula_missing_variables", []) or [])
+            for name in missing:
+                if name not in seen_missing:
+                    seen_missing.add(name)
+                    self.custom_formula_missing_variables.append(name)
+            status = getattr(engine, "custom_formula_status", "default")
+            statuses.append(status)
+            self.custom_formula_validation_by_document.append(
+                {
+                    "doc_id": doc_id,
+                    "filename": document.filename if document else doc_id,
+                    "status": status,
+                    "missing_variables": missing,
+                    "bound_variables": dict(getattr(engine, "custom_formula_bound_variables", {}) or {}),
+                }
+            )
+
+        if not statuses:
+            self.custom_formula_status = "valid"
+        elif all(status == "ready" for status in statuses):
+            self.custom_formula_status = "valid"
+        elif all(status in {"incomplete", "invalid"} for status in statuses):
+            self.custom_formula_status = "incomplete"
+        else:
+            self.custom_formula_status = "partial"
+
+    def _rebuild_data_engines(self) -> None:
+        session_factors = self._session_emission_factors()
+        for doc_id in self.documents:
+            try:
+                dataframe = combine_dataframes(
+                    self.table_dataframes.get(doc_id),
+                    self.fact_dataframes.get(doc_id),
+                )
+            except ImportError:
+                dataframe = None
+
+            if dataframe is not None and not dataframe.empty:
+                self.data_engines[doc_id] = DataEngine(
+                    dataframe,
+                    emission_factors=session_factors or None,
+                    custom_formula=self.custom_formula,
+                    custom_formula_inputs=self.custom_formula_user_inputs,
+                )
+            else:
+                self.data_engines[doc_id] = None
+
+    def _session_emission_factors(self) -> dict[str, float]:
+        session_factors: dict[str, float] = {}
+        for factors in self.document_emission_factors.values():
+            session_factors.update(factors)
+        self.factor_override_keys = sorted(session_factors)
+        return session_factors
+
+    def _summarize_formula_input_columns(self) -> None:
+        columns: dict[str, dict[str, object]] = {}
+        for doc_id, engine in self.data_engines.items():
+            if engine is None or not hasattr(engine, "formula_candidate_columns"):
+                continue
+            document = self.documents.get(doc_id)
+            filename = document.filename if document else doc_id
+            for column in engine.formula_candidate_columns():
+                entry = columns.setdefault(
+                    column,
+                    {
+                        "value": column,
+                        "label": column.replace("_", " "),
+                        "documents": [],
+                    },
+                )
+                documents = entry["documents"]
+                if filename not in documents:
+                    documents.append(filename)
+
+        self.formula_input_columns = sorted(columns.values(), key=lambda item: str(item["label"]))
+
+    def _summarize_report_readiness(self) -> None:
+        district_names: set[str] = set()
+        self.structured_document_count = 0
+        self.structured_district_count = 0
+        self.has_structured_data = False
+        self.report_generation_status = "ready"
+        self.report_generation_warnings = []
+
+        for engine in self.data_engines.values():
+            if engine is None or not hasattr(engine, "districts"):
+                continue
+            districts = [district for district in engine.districts() if str(district).strip()]
+            if not districts:
+                continue
+            self.structured_document_count += 1
+            district_names.update(str(district).strip() for district in districts)
+
+        self.structured_district_count = len(district_names)
+        self.has_structured_data = self.structured_district_count > 0
+
+        if self.custom_formula and not self.has_structured_data:
+            self.report_generation_status = "blocked_missing_structured_data"
+            self.report_generation_warnings.append("custom_formula_detected_but_no_structured_data")
+        elif self.custom_formula_status in {"incomplete", "partial"} and self.custom_formula_missing_variables:
+            self.report_generation_status = "blocked_missing_formula_inputs"
+            self.report_generation_warnings.extend(
+                [f"custom_formula_missing_variable_definition:{name}" for name in self.custom_formula_missing_variables]
+            )
 
 
 class SessionManager:

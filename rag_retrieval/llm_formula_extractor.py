@@ -17,6 +17,7 @@ import ast
 import json
 import operator
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,20 @@ def safe_eval(expression: str, variables: dict[str, float]) -> float:
     except SyntaxError as exc:
         raise ValueError(f"Invalid formula syntax: {expression!r}") from exc
     return _eval_node(tree.body, variables)
+
+
+def extract_formula_variables(expression: str) -> set[str]:
+    """Return variable names referenced in a safe arithmetic expression."""
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid formula syntax: {expression!r}") from exc
+    names = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+    }
+    return names
 
 
 def _eval_node(node: ast.expr, variables: dict[str, float]) -> float:
@@ -128,22 +143,28 @@ class LLMFormulaExtractor:
 
     def extract_from_documents(self, documents: list[ParsedDocument]) -> ExtractedFormula | None:
         """Return an ExtractedFormula if the LLM finds one, else None (triggers default logic)."""
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return None
-
         text = _collect_text(documents)
         if not text.strip():
             return None
 
-        return self._call_llm(text, api_key)
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            formula = self._call_llm(text, api_key)
+            if formula is not None:
+                return formula
+
+        return _extract_formula_deterministically(text)
 
     def extract_from_text(self, text: str) -> ExtractedFormula | None:
         """Run LLM extraction on an arbitrary text string (used for RAG-assisted fallback)."""
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key or not text.strip():
+        if not text.strip():
             return None
-        return self._call_llm(text, api_key)
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            formula = self._call_llm(text, api_key)
+            if formula is not None:
+                return formula
+        return _extract_formula_deterministically(text)
 
     def _call_llm(self, text: str, api_key: str) -> ExtractedFormula | None:
         try:
@@ -203,3 +224,83 @@ def _collect_text(documents: list[ParsedDocument]) -> str:
             if element.element_type in TEXT_TYPES and element.text:
                 parts.append(element.text)
     return "\n".join(parts)
+
+
+_FORMULA_LINE_RE = re.compile(
+    r"(?im)^\s*(?:total\s*(?:co2|co2e|emissions?|carbon\s+footprint|carbon\s+emissions?)|net\s*emissions?)\s*=\s*(?P<expr>.+?)\s*$"
+)
+_WHERE_LINE_RE = re.compile(r"(?im)^\s*(?P<name>[A-Za-z][A-Za-z0-9_ ]{0,80})\s*=\s*(?P<value>.+?)\s*$")
+_NUMBER_RE = re.compile(r"(?P<value>\d+(?:[.,]\d+)?)")
+
+
+def _extract_formula_deterministically(text: str) -> ExtractedFormula | None:
+    formula_match = _FORMULA_LINE_RE.search(text)
+    if not formula_match:
+        return None
+
+    source_text = formula_match.group(0).strip()
+    expression = _normalize_expression(formula_match.group("expr"))
+    if not expression:
+        return None
+
+    constants: dict[str, float] = {}
+    variable_hints: dict[str, str] = {}
+    for line in text.splitlines():
+        if line.strip() == source_text:
+            continue
+        match = _WHERE_LINE_RE.match(line)
+        if not match:
+            continue
+        name = _normalize_variable_name(match.group("name"))
+        rhs = match.group("value").strip()
+        if not name or name in {"where", "formula"} or name.startswith("total_"):
+            continue
+
+        constant = _leading_number(rhs)
+        if constant is not None:
+            constants[name] = constant
+        else:
+            variable_hints[name] = rhs
+
+    try:
+        referenced = extract_formula_variables(expression)
+    except ValueError:
+        return None
+
+    dummy = {**constants, **{name: 0.0 for name in referenced if name not in constants}}
+    try:
+        safe_eval(expression, dummy)
+    except ValueError:
+        return None
+
+    return ExtractedFormula(
+        expression=expression,
+        constants=constants,
+        variable_hints=variable_hints,
+        confidence="medium",
+        source_text=source_text,
+    )
+
+
+def _normalize_expression(expression: str) -> str:
+    normalized = expression.strip()
+    normalized = normalized.replace("×", "*").replace("·", "*").replace("^", "**")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _normalize_variable_name(name: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_ ]+", " ", name).strip().lower()
+    normalized = re.sub(r"\s+", "_", normalized)
+    return normalized.strip("_")
+
+
+def _leading_number(text: str) -> float | None:
+    match = _NUMBER_RE.match(text.strip())
+    if not match:
+        return None
+    raw = match.group("value").replace(",", ".")
+    try:
+        return float(raw)
+    except ValueError:
+        return None

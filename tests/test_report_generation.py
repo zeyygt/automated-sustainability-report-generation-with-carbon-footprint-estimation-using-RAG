@@ -91,6 +91,38 @@ class ReportGenerationTests(unittest.TestCase):
             self.assertTrue(Path(rendered.html_path).exists())
             self.assertTrue(Path(rendered.pdf_path).exists())
 
+    def test_renderer_includes_public_coverage_note_for_custom_formula_fallback(self):
+        report_input = sample_report_input()
+        report_input = ReportInput(
+            title=report_input.title,
+            language=report_input.language,
+            session_id=report_input.session_id,
+            generated_at=report_input.generated_at,
+            documents=report_input.documents,
+            query_results=report_input.query_results,
+            structured_results=report_input.structured_results,
+            retrieval_context=report_input.retrieval_context,
+            sources=report_input.sources,
+            warnings=[
+                "test.xlsx: custom_formula_missing_variable_definition:renewable",
+            ],
+        )
+        generated = GeneratedReport(
+            title=report_input.title,
+            language=report_input.language,
+            generated_at=report_input.generated_at,
+            report_input=report_input,
+            ai_content_markdown="# Executive Summary\nFallback was used.",
+            warnings=report_input.warnings,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rendered = render_report(generated, Path(tmp) / "reports", ReportAssets())
+            html = Path(rendered.html_path).read_text(encoding="utf-8")
+
+        self.assertIn("Coverage Notes", html)
+        self.assertIn("could not be fully applied", html)
+
 
 if __name__ == "__main__":
     unittest.main()
