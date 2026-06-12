@@ -234,6 +234,7 @@
     <button onclick="switchTab('summary')" id="tab-summary" class="flex-1 py-3 text-[12px] font-bold text-secondary border-b-2 border-secondary bg-surface-container-low">SUMMARY</button>
     <button onclick="switchTab('charts')" id="tab-charts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">CHARTS</button>
     <button onclick="switchTab('districts')" id="tab-districts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">DISTRICTS</button>
+    <button onclick="switchTab('audit')" id="tab-audit" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">AUDIT</button>
   </div>
 
   <!-- Tab content -->
@@ -252,11 +253,12 @@
         <tbody id="districts-tbody" class="divide-y divide-[#d9e2ec]"></tbody>
       </table>
     </div>
+    <div id="tab-content-audit" class="hidden p-4 text-[12px] text-on-surface"></div>
   </div>
 
   <!-- Panel Actions -->
   <div class="p-4 bg-[#f7fafc] border-t border-[#d9e2ec] flex flex-col gap-2 flex-shrink-0">
-    <button onclick="window.open('/report/html','_blank')" class="w-full border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">
+    <button onclick="openReportHtml()" class="w-full border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">
       View Full Report
     </button>
     <button onclick="downloadPDF()" class="w-full bg-secondary text-white font-body-sm py-2 px-4 rounded hover:opacity-90 transition-opacity flex items-center justify-center gap-2 shadow-sm">
@@ -293,8 +295,37 @@
   </div>
 </div>
 
+<div id="methodology-resolver-modal" class="hidden fixed inset-0 z-[70] bg-black/40 px-4 py-8">
+  <div class="mx-auto flex h-full w-full max-w-4xl items-center justify-center">
+    <div class="flex max-h-full w-full flex-col overflow-hidden rounded-xl border border-[#d9e2ec] bg-white shadow-xl">
+      <div class="flex items-start justify-between gap-4 border-b border-[#d9e2ec] px-6 py-5">
+        <div>
+          <h3 class="text-[18px] font-semibold text-primary">Resolve Methodology Conflict</h3>
+          <p class="mt-1 text-[13px] text-outline">Choose which uploaded document should supply the active formula and factor values for this session.</p>
+        </div>
+        <button onclick="closeMethodologyResolver()" class="text-outline hover:text-error transition-colors">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div id="methodology-resolver-body" class="overflow-y-auto px-6 py-5"></div>
+      <div class="flex items-center justify-between gap-3 border-t border-[#d9e2ec] bg-[#f7fafc] px-6 py-4">
+        <p class="text-[12px] text-outline">The selected methodology will apply only inside the current browser session.</p>
+        <div class="flex items-center gap-3">
+          <button onclick="closeMethodologyResolver()" class="rounded-lg border border-[#d9e2ec] px-4 py-2 text-[13px] font-medium text-primary hover:bg-white transition-colors">
+            Cancel
+          </button>
+          <button id="methodology-resolver-save" onclick="saveMethodologyResolution()" class="rounded-lg bg-secondary px-4 py-2 text-[13px] font-semibold text-white hover:opacity-90 transition-opacity">
+            Save Resolution
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── State ──────────────────────────────────────────────────────────────────
+  const SESSION_STORAGE_KEY = 'sustainchat_session_id';
   let currentLanguage = 'English';
   let pendingFiles = [];
   let reportData = null;
@@ -305,14 +336,91 @@
     has_structured_data: false,
     structured_district_count: 0,
     custom_formula: null,
+    custom_formula_missing_variables: [],
+    custom_formula_user_inputs: {},
+    formula_input_columns: [],
+    methodology_status: 'clear',
+    methodology_warnings: [],
+    methodology_resolution: {},
+    factor_conflicts: [],
+    formula_conflicts: [],
+    calculation_audit: {},
   };
 
   // ── Init ───────────────────────────────────────────────────────────────────
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
     setupDragDrop();
     marked.setOptions({ breaks: true, gfm: true });
+    await ensureSession();
+    await refreshSessionDiagnostics();
     updateGenerateButtonState();
   });
+
+  function currentSessionId() {
+    return sessionStorage.getItem(SESSION_STORAGE_KEY);
+  }
+
+  function setCurrentSessionId(sessionId) {
+    if (sessionId) {
+      sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    } else {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  }
+
+  function sessionUrl(path) {
+    const sessionId = currentSessionId();
+    if (!sessionId) return path;
+    const joiner = path.includes('?') ? '&' : '?';
+    return `${path}${joiner}session_id=${encodeURIComponent(sessionId)}`;
+  }
+
+  async function ensureSession(force = false) {
+    const existing = !force ? currentSessionId() : null;
+    if (existing) {
+      try {
+        const res = await fetch(sessionUrl('/status'), {
+          headers: { 'X-Session-ID': existing },
+        });
+        if (res.ok) {
+          return existing;
+        }
+      } catch (_) {}
+    }
+
+    const res = await fetch('/session', { method: 'POST' });
+    if (!res.ok) {
+      throw new Error('Could not initialize a browser session.');
+    }
+    const data = await res.json();
+    setCurrentSessionId(data.session_id);
+    return data.session_id;
+  }
+
+  async function sessionFetch(path, options = {}) {
+    const sessionId = await ensureSession();
+    const headers = new Headers(options.headers || {});
+    headers.set('X-Session-ID', sessionId);
+    let response = await fetch(path, { ...options, headers });
+    if (response.status !== 404) {
+      return response;
+    }
+
+    try {
+      const payload = await response.clone().json();
+      if (payload.detail !== 'Session not found.') {
+        return response;
+      }
+    } catch (_) {
+      return response;
+    }
+
+    const freshSessionId = await ensureSession(true);
+    const retryHeaders = new Headers(options.headers || {});
+    retryHeaders.set('X-Session-ID', freshSessionId);
+    response = await fetch(path, { ...options, headers: retryHeaders });
+    return response;
+  }
 
   // ── Language ───────────────────────────────────────────────────────────────
   function setLanguage(lang) {
@@ -367,7 +475,7 @@
     files.forEach(f => formData.append('files', f));
 
     try {
-      const res = await fetch('/upload', { method: 'POST', body: formData });
+      const res = await sessionFetch('/upload', { method: 'POST', body: formData });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       updateFileList(data.files, true);
@@ -377,7 +485,12 @@
       const chunkNote = data.stats.chunk_count > 0
         ? `_Indexed ${data.stats.chunk_count} text chunks in ${data.stats.elapsed_seconds}s._`
         : `_Spreadsheet parsed and ready for district analysis in ${data.stats.elapsed_seconds}s._`;
-      if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+      if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
+        addAssistantMessage(
+          `I've indexed ${names}, but the uploaded methodology documents disagree on the active formula or emission factors.\n\n` +
+          `Open **Resolve Methodology Conflict** before generating the report.\n\n${chunkNote}`
+        );
+      } else if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
         addAssistantMessage(
           `I've indexed ${names} and found a custom emissions formula, but there is no district-level data to apply it to yet.\n\n` +
           `Upload a spreadsheet or a PDF with parseable district data before generating the report.\n\n${chunkNote}`
@@ -449,7 +562,7 @@
     const typingEl = addTypingIndicator();
 
     try {
-      const res = await fetch('/chat', {
+      const res = await sessionFetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, language: currentLanguage }),
@@ -501,6 +614,14 @@
       hideEmptyState();
       return;
     }
+    if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
+      openMethodologyResolver();
+      addAssistantMessage(
+        '⚠️ The uploaded methodology documents conflict with each other. Resolve which formula or emission factor source to trust before generating the report.'
+      );
+      hideEmptyState();
+      return;
+    }
     if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
       openSupportingDataPicker();
       addAssistantMessage(
@@ -521,6 +642,13 @@
   }
 
   async function generateReportFromChat(triggerMessage) {
+    if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
+      openMethodologyResolver();
+      addAssistantMessage(
+        '⚠️ Report generation is paused because the uploaded methodology documents disagree. Choose the correct source in Resolve Methodology Conflict first.'
+      );
+      return;
+    }
     if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
       addAssistantMessage(
         '⚠️ A custom formula was detected, but report generation is paused until you upload district-level data. Add a spreadsheet or a PDF with parseable data first.'
@@ -546,7 +674,7 @@
     const typingEl = addTypingIndicator('Generating your sustainability report — this may take up to a minute...');
 
     try {
-      const res = await fetch('/generate-report', {
+      const res = await sessionFetch('/generate-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, language: currentLanguage }),
@@ -562,6 +690,7 @@
       }
 
       reportData = await res.json();
+      sessionDiagnostics.calculation_audit = reportData.audit || sessionDiagnostics.calculation_audit || {};
       typingEl.remove();
       addReportCard(reportData);
       populateRightPanel(reportData);
@@ -576,7 +705,11 @@
   }
 
   async function downloadPDF() {
-    window.open('/report/pdf', '_blank');
+    window.open(sessionUrl('/report/pdf'), '_blank');
+  }
+
+  function openReportHtml() {
+    window.open(sessionUrl('/report/html'), '_blank');
   }
 
   // ── Right Panel ────────────────────────────────────────────────────────────
@@ -595,7 +728,7 @@
   }
 
   function switchTab(name) {
-    ['summary', 'charts', 'districts'].forEach(t => {
+    ['summary', 'charts', 'districts', 'audit'].forEach(t => {
       const btn = document.getElementById(`tab-${t}`);
       const content = document.getElementById(`tab-content-${t}`);
       if (t === name) {
@@ -620,7 +753,7 @@
       chartsEl.innerHTML = data.charts.map(c => `
         <div>
           <p class="font-body-sm font-semibold text-primary mb-2">${c.title}</p>
-          <img src="/charts/${c.filename}" class="w-full rounded border border-[#d9e2ec]" alt="${c.title}"/>
+          <img src="${sessionUrl(`/charts/${encodeURIComponent(c.filename)}`)}" class="w-full rounded border border-[#d9e2ec]" alt="${c.title}"/>
         </div>`).join('');
     } else {
       chartsEl.innerHTML = '<p class="text-outline text-sm">No charts available.</p>';
@@ -645,21 +778,32 @@
     } else {
       tbody.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-outline text-sm">No district data available.</td></tr>';
     }
+
+    renderAuditPanel(sessionDiagnostics.calculation_audit || data.audit || {});
   }
 
   // ── Session ────────────────────────────────────────────────────────────────
   async function newSession() {
-    await fetch('/session', { method: 'DELETE' });
+    const sessionId = currentSessionId();
+    if (sessionId) {
+      try {
+        await sessionFetch('/session', { method: 'DELETE' });
+      } catch (_) {}
+    }
+    setCurrentSessionId(null);
     document.getElementById('chat-messages').innerHTML = '';
     document.getElementById('file-list').innerHTML = '';
     reportData = null;
     pendingFiles = [];
     renderAttachPreview();
+    closeFormulaResolver();
+    closeMethodologyResolver();
     closePanel();
     document.getElementById('open-panel-btn').classList.add('hidden');
     setStatus('empty', 'No files uploaded');
     resetSessionDiagnostics();
     showEmptyState();
+    await ensureSession(true);
   }
 
   // ── UI Helpers ─────────────────────────────────────────────────────────────
@@ -740,7 +884,7 @@
             </div>
           </div>
           <div class="flex gap-3">
-            <button onclick="window.open('/report/html','_blank')" class="flex-1 border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">View Report</button>
+            <button onclick="openReportHtml()" class="flex-1 border border-secondary text-secondary font-body-sm py-2 px-4 rounded hover:bg-secondary/10 transition-colors">View Report</button>
             <button onclick="downloadPDF()" class="flex-1 bg-secondary text-white font-body-sm py-2 px-4 rounded hover:opacity-90 transition-opacity">Download PDF</button>
           </div>
         </div>
@@ -831,7 +975,7 @@
 
   async function refreshSessionDiagnostics() {
     try {
-      const res = await fetch('/emission-factors');
+      const res = await sessionFetch('/emission-factors');
       if (!res.ok) return;
       const data = await res.json();
       sessionDiagnostics = data;
@@ -846,6 +990,15 @@
       has_structured_data: false,
       structured_district_count: 0,
       custom_formula: null,
+      custom_formula_missing_variables: [],
+      custom_formula_user_inputs: {},
+      formula_input_columns: [],
+      methodology_status: 'clear',
+      methodology_warnings: [],
+      methodology_resolution: {},
+      factor_conflicts: [],
+      formula_conflicts: [],
+      calculation_audit: {},
     };
     applySessionDiagnostics();
   }
@@ -856,7 +1009,13 @@
     const bodyEl = document.getElementById('session-alert-body');
     const actionEl = document.getElementById('session-alert-action');
 
-    if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
+    if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
+      titleEl.textContent = 'Methodology conflict detected';
+      bodyEl.textContent = 'Different uploaded documents define conflicting formulas or emission factors. Choose which source to trust before generating the report.';
+      actionEl.textContent = 'Resolve Methodology';
+      actionEl.onclick = openMethodologyResolver;
+      alertEl.classList.remove('hidden');
+    } else if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
       titleEl.textContent = 'Supporting data required';
       bodyEl.textContent = 'A custom emissions formula was found, but there is no district-level data to apply it to yet. Upload a spreadsheet or a PDF with parseable district data before generating the report.';
       actionEl.textContent = 'Upload Data';
@@ -878,12 +1037,20 @@
     }
 
     updateGenerateButtonState();
+    renderAuditPanel(sessionDiagnostics.calculation_audit || (reportData && reportData.audit) || {});
   }
 
   function updateGenerateButtonState() {
     const button = document.getElementById('generate-btn');
     const icon = document.getElementById('generate-icon');
     const text = document.getElementById('generate-text');
+
+    if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
+      button.className = 'w-full bg-[#8b1e3f] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#8b1e3f]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
+      icon.textContent = 'rule';
+      text.textContent = 'Resolve Methodology';
+      return;
+    }
 
     if (sessionDiagnostics.report_generation_status === 'blocked_missing_structured_data') {
       button.className = 'w-full bg-[#a86600] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-[#a86600]/90 transition-colors flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
@@ -908,6 +1075,15 @@
 
   function openSupportingDataPicker() {
     document.getElementById('sidebar-file-input').click();
+  }
+
+  function openMethodologyResolver() {
+    renderMethodologyResolver();
+    document.getElementById('methodology-resolver-modal').classList.remove('hidden');
+  }
+
+  function closeMethodologyResolver() {
+    document.getElementById('methodology-resolver-modal').classList.add('hidden');
   }
 
   function openFormulaResolver() {
@@ -982,6 +1158,176 @@
     document.getElementById(`formula-column-wrap-${variable}`).classList.toggle('hidden', type !== 'column');
   }
 
+  function renderMethodologyResolver() {
+    const body = document.getElementById('methodology-resolver-body');
+    const formulaConflicts = sessionDiagnostics.formula_conflicts || [];
+    const factorConflicts = sessionDiagnostics.factor_conflicts || [];
+
+    if (!formulaConflicts.length && !factorConflicts.length) {
+      body.innerHTML = '<p class="text-[13px] text-outline">No methodology conflict remains.</p>';
+      return;
+    }
+
+    const sections = [];
+    for (const [index, conflict] of formulaConflicts.entries()) {
+      const options = ['<option value="">Select a formula source</option>']
+        .concat((conflict.candidates || []).map(candidate => {
+          const selected = candidate.doc_id === conflict.selected_doc_id ? 'selected' : '';
+          return `<option value="${escHtml(candidate.doc_id)}" ${selected}>${escHtml(candidate.filename || candidate.doc_id || `Formula ${index + 1}`)}</option>`;
+        }))
+        .join('');
+      const candidateList = (conflict.candidates || []).map(candidate => `
+        <div class="rounded-lg border border-[#d9e2ec] bg-white p-3">
+          <p class="text-[12px] font-semibold text-primary">${escHtml(candidate.filename || candidate.doc_id || 'Unknown document')}</p>
+          <p class="mt-1 font-mono text-[11px] text-on-surface break-words">${escHtml(candidate.expression || 'No expression')}</p>
+        </div>`).join('');
+      sections.push(`
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4 mb-4">
+          <p class="text-[14px] font-semibold text-primary">Formula conflict</p>
+          <p class="mt-1 text-[12px] text-outline">Choose which uploaded document should supply the custom formula.</p>
+          <div class="mt-4">
+            <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Selected formula source</label>
+            <select id="methodology-formula-${index}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">${options}</select>
+          </div>
+          <div class="mt-4 grid gap-3">${candidateList}</div>
+        </section>`);
+    }
+
+    for (const conflict of factorConflicts) {
+      const options = ['<option value="">Select a factor source</option>']
+        .concat((conflict.candidates || []).map(candidate => {
+          const selected = candidate.doc_id === conflict.selected_doc_id ? 'selected' : '';
+          const label = `${candidate.filename || candidate.doc_id} (${candidate.value})`;
+          return `<option value="${escHtml(candidate.doc_id)}" ${selected}>${escHtml(label)}</option>`;
+        }))
+        .join('');
+      sections.push(`
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4 mb-4">
+          <p class="text-[14px] font-semibold text-primary">${escHtml(conflict.metric_key)} factor conflict</p>
+          <p class="mt-1 text-[12px] text-outline">The uploaded documents define different values for this emission factor.</p>
+          <div class="mt-4">
+            <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Selected factor source</label>
+            <select id="methodology-factor-${escHtml(conflict.metric_key)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">${options}</select>
+          </div>
+        </section>`);
+    }
+
+    body.innerHTML = sections.join('');
+  }
+
+  async function saveMethodologyResolution() {
+    const formulaConflicts = sessionDiagnostics.formula_conflicts || [];
+    const factorConflicts = sessionDiagnostics.factor_conflicts || [];
+    const payload = { formula_doc_id: null, factor_doc_ids: {} };
+
+    for (const [index] of formulaConflicts.entries()) {
+      const value = document.getElementById(`methodology-formula-${index}`)?.value || '';
+      if (!value) {
+        alert('Please choose the formula source to continue.');
+        return;
+      }
+      payload.formula_doc_id = value;
+    }
+
+    for (const conflict of factorConflicts) {
+      const value = document.getElementById(`methodology-factor-${conflict.metric_key}`)?.value || '';
+      if (!value) {
+        alert(`Please choose the factor source for ${conflict.metric_key}.`);
+        return;
+      }
+      payload.factor_doc_ids[conflict.metric_key] = value;
+    }
+
+    const saveBtn = document.getElementById('methodology-resolver-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+      const res = await sessionFetch('/methodology-resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to resolve methodology conflict.');
+      sessionDiagnostics = data;
+      applySessionDiagnostics();
+      closeMethodologyResolver();
+      addAssistantMessage('I saved the methodology resolution for this session. You can continue with report generation now.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Resolution';
+    }
+  }
+
+  function renderAuditPanel(audit) {
+    const root = document.getElementById('tab-content-audit');
+    if (!root) return;
+
+    const reportStatus = sessionDiagnostics.report_generation_status || 'ready';
+    const formula = audit.formula || {};
+    const factors = audit.factors || {};
+    const methodology = audit.methodology || {};
+    const warnings = sessionDiagnostics.report_generation_warnings || [];
+
+    const formulaHtml = formula.selected
+      ? `
+        <div class="rounded-lg border border-[#d9e2ec] bg-white p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Selected Formula</p>
+          <p class="mt-1 text-[12px] font-medium text-primary">${escHtml(formula.selected.filename || formula.selected.doc_id || 'Session formula')}</p>
+          <p class="mt-2 font-mono text-[11px] break-words text-on-surface">${escHtml(formula.selected.expression || '')}</p>
+        </div>`
+      : '<div class="rounded-lg border border-[#d9e2ec] bg-white p-3 text-[12px] text-outline">No custom formula is active. The system is using default emissions logic.</div>';
+
+    const factorRows = Object.entries(factors.selected || {}).map(([metric, entry]) => `
+      <tr class="border-b border-[#eef2f6]">
+        <td class="py-2 pr-2 font-medium text-primary">${escHtml(metric)}</td>
+        <td class="py-2 pr-2">${escHtml(String(entry.value))}</td>
+        <td class="py-2">${escHtml(entry.filename || entry.source || 'reference')}</td>
+      </tr>`).join('');
+
+    const warningHtml = warnings.length
+      ? `<ul class="list-disc pl-4 text-[12px] text-[#8a5a00]">${warnings.map(item => `<li>${escHtml(item)}</li>`).join('')}</ul>`
+      : '<p class="text-[12px] text-outline">No active warnings.</p>';
+
+    root.innerHTML = `
+      <div class="space-y-4">
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Report Status</p>
+          <p class="mt-1 text-[14px] font-semibold text-primary">${escHtml(reportStatus)}</p>
+          <p class="mt-2 text-[12px] text-outline">Methodology status: ${escHtml(methodology.status || sessionDiagnostics.methodology_status || 'clear')}</p>
+        </section>
+        <section class="space-y-3">
+          ${formulaHtml}
+        </section>
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Selected Factors</p>
+          <div class="mt-3 overflow-hidden rounded-lg border border-[#eef2f6] bg-white">
+            <table class="w-full text-[12px]">
+              <thead class="bg-[#f7fafc] text-outline">
+                <tr>
+                  <th class="px-3 py-2 text-left font-semibold">Metric</th>
+                  <th class="px-3 py-2 text-left font-semibold">Value</th>
+                  <th class="px-3 py-2 text-left font-semibold">Source</th>
+                </tr>
+              </thead>
+              <tbody class="px-3">${factorRows || '<tr><td colspan="3" class="px-3 py-3 text-outline">No factor override is active.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </section>
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">User Inputs</p>
+          <pre class="mt-2 overflow-auto rounded-lg bg-white p-3 text-[11px] text-on-surface">${escHtml(JSON.stringify(formula.user_inputs || {}, null, 2))}</pre>
+        </section>
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Warnings</p>
+          <div class="mt-2">${warningHtml}</div>
+        </section>
+      </div>`;
+  }
+
   async function saveFormulaInputs() {
     const missing = sessionDiagnostics.custom_formula_missing_variables || [];
     const payload = { variables: {} };
@@ -1015,7 +1361,7 @@
     saveBtn.textContent = 'Saving...';
 
     try {
-      const res = await fetch('/formula-inputs', {
+      const res = await sessionFetch('/formula-inputs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

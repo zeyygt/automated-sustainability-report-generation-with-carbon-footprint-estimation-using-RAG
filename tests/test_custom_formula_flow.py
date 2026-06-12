@@ -4,9 +4,22 @@ from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
 from rag_retrieval.llm_formula_extractor import ExtractedFormula
 from rag_retrieval.report_pipeline import generate_sustainability_report
 from rag_retrieval.session import RetrievalSession
+
+
+def _write_pdf(path: Path, lines: list[str]) -> None:
+    pdf = canvas.Canvas(str(path), pagesize=A4)
+    x = 72
+    y = 800
+    for line in lines:
+        pdf.drawString(x, y, line)
+        y -= 18
+    pdf.save()
 
 
 class CustomFormulaFlowTests(unittest.TestCase):
@@ -229,6 +242,66 @@ class CustomFormulaFlowTests(unittest.TestCase):
         self.assertEqual(session.custom_formula_status, "valid")
         self.assertEqual(result["formula_status"], "custom_applied")
         self.assertEqual(result["total_emission"], 620.0)
+
+    def test_conflicting_methodology_requires_explicit_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(environ, {"OPENAI_API_KEY": ""}, clear=False):
+            tmp_path = Path(tmp)
+            formula_a = tmp_path / "methodology_a.pdf"
+            formula_b = tmp_path / "methodology_b.pdf"
+            dataset = Path("test_ibb_39_districts.xlsx")
+
+            _write_pdf(
+                formula_a,
+                [
+                    "Total CO2 = electricity * electricity_factor + natural_gas * natural_gas_factor",
+                    "electricity factor = 0.45 kgCO2e/kWh",
+                    "natural gas factor = 2.04 kgCO2e/m3",
+                ],
+            )
+            _write_pdf(
+                formula_b,
+                [
+                    "Total CO2 = electricity * electricity_factor + natural_gas * natural_gas_factor + direct_emissions",
+                    "electricity factor = 0.52 kgCO2e/kWh",
+                    "natural gas factor = 2.18 kgCO2e/m3",
+                ],
+            )
+
+            session = RetrievalSession()
+            session.build_index([formula_a, formula_b, dataset])
+
+        self.assertEqual(session.methodology_status, "needs_resolution")
+        self.assertEqual(session.report_generation_status, "blocked_methodology_conflict")
+        self.assertTrue(session.factor_conflicts)
+        self.assertTrue(session.formula_conflicts)
+        self.assertIsNone(session.custom_formula)
+
+        formula_doc_id = next(
+            candidate["doc_id"]
+            for candidate in session.formula_conflicts[0]["candidates"]
+            if candidate["filename"] == "methodology_b.pdf"
+        )
+        session.update_methodology_resolution(
+            formula_doc_id=formula_doc_id,
+            factor_doc_ids={
+                "electricity": next(
+                    candidate["doc_id"]
+                    for candidate in next(conflict for conflict in session.factor_conflicts if conflict["metric_key"] == "electricity")["candidates"]
+                    if candidate["filename"] == "methodology_b.pdf"
+                ),
+                "natural_gas": next(
+                    candidate["doc_id"]
+                    for candidate in next(conflict for conflict in session.factor_conflicts if conflict["metric_key"] == "natural_gas")["candidates"]
+                    if candidate["filename"] == "methodology_b.pdf"
+                ),
+            },
+        )
+
+        self.assertEqual(session.methodology_status, "clear")
+        self.assertEqual(session.report_generation_status, "ready")
+        self.assertIsNotNone(session.custom_formula)
+        self.assertIn("direct_emissions", session.custom_formula.expression)
+        self.assertEqual(session.calculation_audit["formula"]["selected"]["filename"], "methodology_b.pdf")
 
 
 if __name__ == "__main__":

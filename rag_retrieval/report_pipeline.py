@@ -38,6 +38,11 @@ def generate_sustainability_report(
             + (f": {missing}." if missing else ".")
             + " Resolve the missing variables before generating the report."
         )
+    if status == "blocked_methodology_conflict":
+        raise ValueError(
+            "Multiple uploaded methodology documents define conflicting formulas or emission factors. "
+            "Resolve the conflict before generating the report."
+        )
 
     output_path = Path(output_dir)
     charts_path = Path(chart_dir) if chart_dir else output_path / "charts"
