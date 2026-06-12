@@ -24,6 +24,8 @@ def public_metrics(structured_results: list[dict]) -> list[dict]:
                 "gas_emission": 0.0,
                 "electricity_emission": 0.0,
                 "direct_emissions": 0.0,
+                "emission_unit": "kgCO2e",
+                "population": None,
                 "per_capita": None,
                 "per_household": None,
                 "growth": None,
@@ -37,9 +39,12 @@ def public_metrics(structured_results: list[dict]) -> list[dict]:
         _merge_top_level_numeric(current, data, "gas_emission")
         _merge_top_level_numeric(current, data, "electricity_emission")
         _merge_top_level_numeric(current, data, "direct_emissions")
+        _merge_optional_numeric(current, data, "population")
         _merge_optional_numeric(current, data, "per_capita")
         _merge_optional_numeric(current, data, "per_household")
         _merge_optional_numeric(current, data, "growth")
+        if data.get("emission_unit"):
+            current["emission_unit"] = str(data.get("emission_unit"))
         current["warnings"] = sorted(set([*current.get("warnings", []), *(data.get("warnings", []) or [])]))
 
         all_metrics = dict(data.get("metrics") or {})

@@ -64,6 +64,34 @@ class DataEngineTests(unittest.TestCase):
 
         self.assertIsNone(result["growth"])
 
+    def test_growth_rate_column_is_scaled_consistently_across_districts(self):
+        # A and B straddle the old per-row 1.5 threshold; both must be scaled by
+        # the same column-wide divisor so their relative order is preserved
+        # rather than one reading as 140% and the other as 1.55%.
+        dataframe = pd.DataFrame(
+            [
+                {"District": "A", "Electricity Consumption (kWh)": 100, "Growth Rate": 1.40},
+                {"District": "B", "Electricity Consumption (kWh)": 100, "Growth Rate": 1.55},
+            ]
+        )
+
+        engine = DataEngine(dataframe)
+        growth_a = engine.analyze_district("A")["growth"]
+        growth_b = engine.analyze_district("B")["growth"]
+
+        self.assertIsNotNone(growth_a)
+        self.assertIsNotNone(growth_b)
+        self.assertAlmostEqual(growth_a / growth_b, 1.40 / 1.55)
+
+    def test_analyze_district_reports_emission_unit(self):
+        dataframe = pd.DataFrame(
+            [{"District": "A", "Electricity Consumption (kWh)": 100}]
+        )
+
+        result = DataEngine(dataframe).analyze_district("A")
+
+        self.assertEqual(result["emission_unit"], "kgCO2e")
+
     def test_wide_pdf_table_is_normalized_to_long_format(self):
         dataframe = pd.DataFrame(
             [

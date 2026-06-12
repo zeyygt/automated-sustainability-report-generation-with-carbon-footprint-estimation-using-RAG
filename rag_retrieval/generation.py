@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from .insight_engine import build_report_insights
+from .metric_semantics import metric_semantic_profile
 from .recommendation_engine import build_report_recommendations
 from .report_metrics import public_metrics
 from .report_models import GeneratedReport, ReportInput
@@ -14,8 +15,16 @@ from .report_models import GeneratedReport, ReportInput
 
 DEFAULT_MODEL = "gpt-4o"
 DEFAULT_REASONING_EFFORT = "high"
-DEFAULT_TIMEOUT_SECONDS = 90.0
-DEFAULT_MAX_OUTPUT_TOKENS = 1200
+DEFAULT_TIMEOUT_SECONDS = 180.0
+# Output budget is resolved dynamically from report size (see
+# _effective_max_tokens): more districts and especially more additional metrics
+# mean longer Resource/Context sections, more commentary and more
+# recommendations. These bound that budget.
+DEFAULT_MAX_OUTPUT_TOKENS = 4500
+MIN_OUTPUT_TOKENS = 4500
+MAX_OUTPUT_TOKENS_CEILING = 14000
+TOKENS_PER_EXTRA_METRIC = 900
+CORE_METRIC_KEYS = {"electricity", "natural_gas", "water"}
 
 
 class OpenAIReportGenerator:
@@ -36,7 +45,9 @@ class OpenAIReportGenerator:
         )
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
         self.timeout_seconds = float(os.getenv("OPENAI_TIMEOUT", DEFAULT_TIMEOUT_SECONDS))
-        self.max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS))
+        # An explicit env value pins the budget; otherwise it scales per report.
+        explicit = os.getenv("OPENAI_MAX_OUTPUT_TOKENS")
+        self.max_output_tokens = int(explicit) if explicit else None
 
     def generate(self, report_input: ReportInput) -> GeneratedReport:
         warnings: list[str] = []
@@ -59,12 +70,29 @@ class OpenAIReportGenerator:
             warnings=[*report_input.warnings, *warnings],
         )
 
+    def _effective_max_tokens(self, report_input: ReportInput) -> int:
+        """Resolve the output budget. A pinned env value wins; otherwise scale
+        with report size so reports rich in additional metrics (waste, water,
+        recycling, trees, ...) are not truncated."""
+        if self.max_output_tokens:
+            return self.max_output_tokens
+        metrics = public_metrics(report_input.structured_results)
+        district_count = len(metrics)
+        extra_metric_count = _count_extra_metrics(report_input, metrics)
+        budget = (
+            MIN_OUTPUT_TOKENS
+            + extra_metric_count * TOKENS_PER_EXTRA_METRIC
+            + min(district_count, 12) * 40
+        )
+        return max(MIN_OUTPUT_TOKENS, min(budget, MAX_OUTPUT_TOKENS_CEILING))
+
     def _generate_with_openai(self, report_input: ReportInput) -> str:
         from openai import OpenAI
 
         client = OpenAI(api_key=self.api_key, timeout=self.timeout_seconds)
         system_content = _system_prompt(report_input.language)
         user_content = json.dumps(_compact_report_payload(report_input), ensure_ascii=False)
+        max_output_tokens = self._effective_max_tokens(report_input)
         if _uses_chat_completions(self.model):
             response = client.chat.completions.create(
                 model=self.model,
@@ -72,14 +100,14 @@ class OpenAIReportGenerator:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_content},
                 ],
-                max_tokens=self.max_output_tokens,
+                max_tokens=max_output_tokens,
                 temperature=0.2,
             )
             return response.choices[0].message.content or ""
 
         request = {
             "model": self.model,
-            "max_output_tokens": self.max_output_tokens,
+            "max_output_tokens": max_output_tokens,
             "input": [
                 {
                     "role": "system",
@@ -143,11 +171,12 @@ def _deterministic_report_content_en(
             "# Municipality-Wide Assessment",
         ]
     )
+    emission_unit = str(municipality.get("emission_unit") or "kgCO2e")
     if municipality.get("district_count"):
         lines.append(f"- The current assessment covers {int(municipality['district_count'])} districts.")
         if float(municipality.get("total_emissions") or 0.0) > 0.0:
             lines.append(
-                f"- Combined reported emissions across the covered districts are {float(municipality['total_emissions']):,.2f}."
+                f"- Combined reported emissions across the covered districts are {float(municipality['total_emissions']):,.2f} {emission_unit}."
             )
         if float(municipality.get("total_water_consumption") or 0.0) > 0.0:
             lines.append(
@@ -156,7 +185,7 @@ def _deterministic_report_content_en(
         highest_emission = municipality.get("highest_emission_district")
         if highest_emission:
             lines.append(
-                f"- {highest_emission['district']} is the highest-emission district in the uploaded dataset at {float(highest_emission['value']):,.2f}."
+                f"- {highest_emission['district']} is the highest-emission district in the uploaded dataset at {float(highest_emission['value']):,.2f} {emission_unit}."
             )
         highest_water = municipality.get("highest_water_district")
         if highest_water:
@@ -164,6 +193,8 @@ def _deterministic_report_content_en(
                 f"- {highest_water['district']} has the highest recorded water demand at {float(highest_water['value']):,.2f} m3."
             )
         lines.append(f"- Overall reporting coverage is assessed as {municipality.get('coverage_level', 'moderate')}.")
+        for finding in _analysis_finding_lines(insights, english=True)[:4]:
+            lines.append(f"- {finding}")
         for focus in focus_lines[:3]:
             lines.append(f"- {focus}")
     else:
@@ -277,13 +308,15 @@ def _deterministic_report_content_en(
     lines.extend(["", "# Strategic Recommendations"])
     if strategy_lines:
         for item in strategy_lines[:5]:
-            lines.append(f"- {item['title_en']}: {item['rationale_en']}")
+            lines.extend(_strategy_block(item, english=True))
+            lines.append("")
     else:
         lines.extend(_priority_actions_en(insights, coverage_notes))
 
     lines.extend(["", "# Data Quality and Coverage Notes"])
-    if coverage_notes or data_quality_notes:
-        for note in [*coverage_notes, *data_quality_notes]:
+    plausibility_notes = _plausibility_note_lines(insights, english=True)
+    if coverage_notes or data_quality_notes or plausibility_notes:
+        for note in [*plausibility_notes, *coverage_notes, *data_quality_notes]:
             lines.append(f"- {note}")
     else:
         lines.append("- Coverage is sufficient for a directional district comparison, but continued multi-period collection will strengthen future reporting.")
@@ -314,21 +347,24 @@ def _deterministic_report_content_tr(
         lines.append(f"Kapsam sınırlılığı notu: {coverage_notes[0]}")
 
     lines.extend(["", "# Belediye Geneli Değerlendirme"])
+    emission_unit = str(municipality.get("emission_unit") or "kgCO2e")
     if municipality.get("district_count"):
         lines.append(f"- Mevcut değerlendirme {int(municipality['district_count'])} ilçeyi kapsamaktadır.")
         if float(municipality.get("total_emissions") or 0.0) > 0.0:
-            lines.append(f"- Kapsanan ilçelerde birleşik toplam emisyon {float(municipality['total_emissions']):,.2f} düzeyindedir.")
+            lines.append(f"- Kapsanan ilçelerde birleşik toplam emisyon {float(municipality['total_emissions']):,.2f} {emission_unit} düzeyindedir.")
         if float(municipality.get("total_water_consumption") or 0.0) > 0.0:
             lines.append(f"- Birleşik toplam su tüketimi {float(municipality['total_water_consumption']):,.2f} m3 seviyesindedir.")
         highest_emission = municipality.get("highest_emission_district")
         if highest_emission:
-            lines.append(f"- {highest_emission['district']}, {float(highest_emission['value']):,.2f} ile veri setindeki en yüksek emisyonlu ilçedir.")
+            lines.append(f"- {highest_emission['district']}, {float(highest_emission['value']):,.2f} {emission_unit} ile veri setindeki en yüksek emisyonlu ilçedir.")
         highest_water = municipality.get("highest_water_district")
         if highest_water:
             lines.append(f"- {highest_water['district']}, {float(highest_water['value']):,.2f} m3 ile en yüksek su talebine sahiptir.")
         lines.append(
             f"- Genel veri kapsayıcılığı seviyesi {_coverage_level_label_tr(str(municipality.get('coverage_level') or 'moderate'))} olarak değerlendirilmektedir."
         )
+        for finding in _analysis_finding_lines(insights, english=False)[:4]:
+            lines.append(f"- {finding}")
         for focus in focus_lines[:3]:
             lines.append(f"- {focus}")
     else:
@@ -442,13 +478,15 @@ def _deterministic_report_content_tr(
     lines.extend(["", "# Stratejik Öneriler"])
     if strategy_lines:
         for item in strategy_lines[:5]:
-            lines.append(f"- {item['title_tr']}: {item['rationale_tr']}")
+            lines.extend(_strategy_block(item, english=False))
+            lines.append("")
     else:
         lines.extend(_priority_actions_tr(insights, coverage_notes))
 
     lines.extend(["", "# Veri Kalitesi ve Kapsam Notları"])
-    if coverage_notes or data_quality_notes:
-        for note in [*coverage_notes, *data_quality_notes]:
+    plausibility_notes = _plausibility_note_lines(insights, english=False)
+    if coverage_notes or data_quality_notes or plausibility_notes:
+        for note in [*plausibility_notes, *coverage_notes, *data_quality_notes]:
             lines.append(f"- {note}")
     else:
         lines.append("- Mevcut kapsam yön gösterici ilçe karşılaştırması için yeterlidir; ancak düzenli çok dönemli veri toplama gelecekteki raporları güçlendirecektir.")
@@ -465,16 +503,27 @@ def _system_prompt(language: str) -> str:
         "You are an expert sustainability report writer. "
         f"Write the report in {language}. "
         "Write as a public-facing municipal sustainability report, not as a technical system report. "
-        "Keep the narrative concise but substantive; the report should read like a professional municipal assessment, not a generic summary. "
+        "Write a substantial, professionally detailed assessment — not a short summary of bullet-like blurbs. "
+        "Each section must DEVELOP its topic with specific district names, numbers, and interpretation, and must add new information rather than restating earlier sections. "
+        "Do not repeat the same headline fact (for example the electricity share, the top-three concentration figure, or the growth caveat) in more than one section; introduce each fact once and build on it elsewhere. "
+        "Give each section a distinct lane and keep facts in their owning section: the Executive Summary is a tight 4-5 sentence overview; Municipality-Wide Assessment owns concentration and per-capita intensity spread and what they mean for prioritization; Emissions Overview owns the electricity-versus-gas composition and the specific instruments and districts that follow from it (state the electricity share only here); District Context and Sustainability Signals owns the additional metrics and their meaning; Data Quality owns the plausibility caveats. Do not restate a section's owned fact in another section. "
+        "The Executive Summary is a tight overview; every later section then goes deeper than the summary rather than paraphrasing it. "
+        "Write each District Commentary entry as a substantive paragraph of at least three to four sentences covering the district's standing, what drives it, how it compares to the municipal median, and one concrete implication unique to it. "
+        "Write Strategic Recommendations as concrete operational actions: for each, state what to do (specific instruments), where (named districts), in what sequence or timeframe, and the measurable target or expected effect — never a vague one-line aspiration. "
         "Use public_metrics as the source of truth for all numeric values. "
         "Use the supplied insights and recommendations to explain the municipality-wide picture, identify priority districts, and justify why those districts matter. "
         "Write Municipality-Wide Assessment as an analytical synthesis of concentration, trend direction, and coverage limits, not as a restatement of the table. "
+        "Ground that synthesis in insights.analytical_findings and insights.analytics: state whether the emission burden is concentrated or broadly distributed (use the top-three share), name the dominant energy lever (electricity vs natural gas) and its share, and use per-capita intensity to qualify the absolute ranking so a small high-intensity district is not mistaken for a large emitter. "
+        "Always attach the emission unit (municipality.emission_unit, e.g. kgCO2e) the first time a total or per-capita emission figure appears. "
+        "Treat any insights.coverage.plausibility_flags as mandatory caveats: if growth looks implausibly high, intensity spread is implausibly wide, the distribution is suspiciously uniform, or a context metric is near-perfectly correlated with emissions, say so plainly in Data Quality and Coverage Notes and soften the related claims accordingly. "
         "Resource Overview must use only resource_metrics. If resource_metrics is empty, explicitly say that no additional district-level resource metrics were detected beyond the core energy and water inputs. "
         "District Context and Sustainability Signals must use only context_metrics and must not be merged into Resource Overview. "
-        "In District Commentary, write concrete district-level interpretation instead of repeating raw numbers alone. "
-        "Choose districts that illustrate different patterns when possible: current emissions core, fast-growth frontier, ecological context, lower-pressure baseline, direct-emission profile, or data gaps. "
-        "Do not repeat the same explanation template across district commentaries; each district should have a distinct analytical angle and a distinct practical implication. "
+        "In District Commentary, write one entry for each district in recommendations.priority_district_commentary, in that order, and do not substitute other districts or invent commentary for districts not in that list. "
+        "Use each district's pre-computed archetype and angle (emissions core, fast-growth frontier, transition watchlist, context-rich, lower-pressure baseline, data gap) so the set stays varied; this list is already chosen to illustrate different patterns. "
+        "Do not repeat the same explanation template across district commentaries; each district must have a distinct analytical angle and a distinct practical implication, and two districts of the same archetype must still read differently (e.g. lead one on rank, another on per-capita intensity or growth). "
         "Use additional non-emission sustainability metrics when they are present; contextual indicators should shape the narrative even when they are not part of the carbon formula. "
+        "Frame every additional metric by its sustainability meaning, not its raw name: an offsetting asset (higher is better, e.g. recycling, renewable share, vegetation), a resource pressure (higher is worse, e.g. waste or water volume), or a neutral context indicator. Do not assume any metric is good simply because it is high. "
+        "Never present a metric flagged as size-correlated in the plausibility notes as an independent advantage or a targeting layer anywhere in the report, including District Commentary and Strategic Recommendations; describe it as reflecting district size instead. "
         "Comment on general municipal status, district-level implications, practical recommendations, and any observable tradeoffs between emissions, water, and contextual indicators. "
         "For growth values, use growth_display exactly as provided when present; never reinterpret raw growth as a different percentage. "
         "Do not mention source filenames, PDFs, Excel files, parsers, retrieval, RAG, DataEngine, extraction, chunks, prompts, or methodology. "
@@ -539,6 +588,73 @@ def _public_coverage_notes(warnings: list[str], language: str) -> list[str]:
             if english
             else "Özel bir emisyon formülü sağlandı; ancak bazı gerekli değişkenler tanımlı olmadığı veya eksik olduğu için standart hesap yöntemi kullanılmaya devam edildi."
         )
+    return notes
+
+
+def _count_extra_metrics(report_input: ReportInput, metrics: list[dict[str, Any]] | None = None) -> int:
+    """Distinct non-core sustainability metrics present in the report, counted
+    from both the discovered-metric catalog and the structured values."""
+    metrics = metrics if metrics is not None else public_metrics(report_input.structured_results)
+    keys: set[str] = set()
+    for detected in report_input.detected_metrics or []:
+        metric_key = str(detected.get("metric_key") or "")
+        if metric_key and metric_key not in CORE_METRIC_KEYS and detected.get("sustainability_related"):
+            keys.add(metric_key)
+    for item in metrics:
+        for metric_key, summary in (item.get("metric_summaries") or {}).items():
+            if metric_key in CORE_METRIC_KEYS:
+                continue
+            if float(summary.get("value") or 0.0) > 0.0:
+                keys.add(str(metric_key))
+    return len(keys)
+
+
+def _strategy_block(item: dict[str, Any], *, english: bool) -> list[str]:
+    """Render one strategic recommendation as an operational block: title,
+    rationale, and concrete Do / Where / When / Target lines when present."""
+    suffix = "en" if english else "tr"
+    title = item.get(f"title_{suffix}") or ""
+    lines = [f"### {title}"]
+    rationale = item.get(f"rationale_{suffix}")
+    if rationale:
+        lines.append(str(rationale))
+    instruments = list(item.get(f"instruments_{suffix}") or [])
+    if instruments:
+        label = "Do" if english else "Yapılacak"
+        lines.append(f"- {label}: {'; '.join(instruments)}.")
+    districts = list(item.get("districts") or [])
+    if districts:
+        label = "Where" if english else "Nerede"
+        lines.append(f"- {label}: {', '.join(districts)}.")
+    sequence = item.get(f"sequence_{suffix}")
+    if sequence:
+        label = "When" if english else "Ne zaman"
+        lines.append(f"- {label}: {sequence}")
+    target = item.get(f"target_{suffix}")
+    if target:
+        label = "Target" if english else "Hedef"
+        lines.append(f"- {label}: {target}")
+    return lines
+
+
+def _analysis_finding_lines(insights: dict[str, Any], *, english: bool) -> list[str]:
+    lines: list[str] = []
+    for finding in insights.get("analytical_findings") or []:
+        if finding.get("severity") == "data_quality":
+            continue
+        detail = finding.get("detail_en") if english else finding.get("detail_tr")
+        if detail:
+            lines.append(str(detail))
+    return lines
+
+
+def _plausibility_note_lines(insights: dict[str, Any], *, english: bool) -> list[str]:
+    flags = ((insights.get("coverage") or {}).get("plausibility_flags")) or []
+    notes: list[str] = []
+    for flag in flags:
+        note = flag.get("note_en") if english else flag.get("note_tr")
+        if note:
+            notes.append(str(note))
     return notes
 
 
@@ -755,6 +871,8 @@ def _compact_insights(insights: dict[str, Any]) -> dict[str, Any]:
         "highest_emission_districts": list(insights.get("highest_emission_districts") or [])[:5],
         "highest_water_districts": list(insights.get("highest_water_districts") or [])[:5],
         "context_highlights": list(insights.get("context_highlights") or [])[:6],
+        "analytics": insights.get("analytics"),
+        "analytical_findings": list(insights.get("analytical_findings") or [])[:8],
         "coverage": insights.get("coverage"),
     }
 
@@ -779,7 +897,6 @@ def _compact_recommendations(recommendations: dict[str, Any]) -> dict[str, Any]:
                 "commentary_angle": item.get("commentary_angle"),
                 "emission_rank": item.get("emission_rank"),
                 "growth_rank": item.get("growth_rank"),
-                "tree_rank": item.get("tree_rank"),
                 "total_emission": item.get("total_emission"),
             }
             for item in list(recommendations.get("priority_district_commentary") or [])[:6]
@@ -798,6 +915,12 @@ def _detected_metric_catalog(detected_metrics: list[dict[str, Any]], active_metr
             continue
         if float(item.get("numeric_availability") or 0.0) <= 0.0 and metric_key not in active_metric_keys:
             continue
+        semantics = metric_semantic_profile(
+            category=item.get("category"),
+            role=item.get("role"),
+            metric_key=metric_key,
+            label=item.get("display_name"),
+        )
         catalog.append(
             {
                 "metric_key": metric_key,
@@ -805,6 +928,10 @@ def _detected_metric_catalog(detected_metrics: list[dict[str, Any]], active_metr
                 "category": item.get("category"),
                 "role": item.get("role"),
                 "report_section": item.get("report_section"),
+                "direction": semantics["direction"],
+                "relation": semantics["relation"],
+                "is_asset": semantics["asset"],
+                "significance": semantics["significance_en"],
             }
         )
     return catalog[:12]

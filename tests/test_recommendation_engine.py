@@ -117,6 +117,125 @@ class RecommendationEngineTests(unittest.TestCase):
         self.assertIn("Growth", districts)
         self.assertGreaterEqual(len(angles), 3)
 
+    def test_commentary_adds_comparative_grounding_clause(self):
+        metrics = [
+            _commentary_metric("High", 2000.0, per_capita=400.0),
+            _commentary_metric("Low", 1000.0, per_capita=100.0),
+        ]
+        insights = build_report_insights(metrics)
+
+        recommendations = build_report_recommendations(metrics, insights)
+        summaries = " ".join(item["summary_en"] for item in recommendations["priority_district_commentary"])
+
+        self.assertIn("municipal median", summaries)
+        self.assertIn("per-capita intensity", summaries)
+
+    def test_tree_count_size_proxy_replaces_naive_ecology_claim(self):
+        # Tree count moves in lockstep with emissions, so the analytics layer
+        # flags it; commentary must call it out as size, not an advantage.
+        metrics = [
+            _commentary_metric(f"D{i}", float(value), per_capita=50.0, tree_count=float(value))
+            for i, value in enumerate([600, 500, 400, 300, 200, 100])
+        ]
+        insights = build_report_insights(metrics)
+
+        recommendations = build_report_recommendations(metrics, insights)
+        summaries = " ".join(item["summary_en"] for item in recommendations["priority_district_commentary"])
+
+        self.assertIn("reflects district size", summaries)
+        self.assertNotIn("Tree Count sits above the municipal median", summaries)
+
+    def test_waste_and_recycling_are_framed_generically(self):
+        # No hard-coding: a waste metric reads as pressure, a recycling metric
+        # as an asset, with no tree_count anywhere in the dataset.
+        metrics = []
+        for i, district in enumerate(["Kadikoy", "Besiktas", "Sisli", "Uskudar", "Fatih", "Maltepe"]):
+            metrics.append(
+                _commentary_metric(
+                    district,
+                    float(600 - i * 40),
+                    per_capita=50.0,
+                    extras={
+                        "waste": ("Waste", "waste", "resource_kpi", float(300 + (i % 3) * 150)),
+                        "recycling_rate": ("Recycling Rate", "waste", "resource_kpi", float(80 - (i % 4) * 15)),
+                    },
+                )
+            )
+        insights = build_report_insights(metrics)
+
+        recommendations = build_report_recommendations(metrics, insights)
+        summaries = " ".join(item["summary_en"] for item in recommendations["priority_district_commentary"])
+
+        self.assertIn("offsetting sustainability asset", summaries)  # recycling
+        self.assertIn("resource pressure", summaries)  # waste
+        self.assertNotIn("tree", summaries.lower())
+
+    def test_strategic_recommendations_are_operational(self):
+        metrics = [
+            _commentary_metric("Adalar", 1000.0, per_capita=400.0),
+            _commentary_metric("Sile", 900.0, per_capita=300.0),
+            _commentary_metric("Catalca", 800.0, per_capita=200.0),
+            _commentary_metric("Esenyurt", 200.0, per_capita=50.0),
+        ]
+        insights = build_report_insights(metrics)
+
+        recommendations = build_report_recommendations(metrics, insights)
+        core = next(
+            item
+            for item in recommendations["strategic_recommendations"]
+            if "emissions core" in item["title_en"].lower()
+        )
+
+        self.assertTrue(core["instruments_en"])  # concrete measures, not a one-liner
+        self.assertTrue(core["sequence_en"])  # has a timeframe/sequencing
+        self.assertTrue(core["target_en"])  # has a measurable target
+        # Lever-aware: electricity dominates this synthetic data.
+        self.assertIn("electricity", core["rationale_en"].lower())
+
+
+def _commentary_metric(district, total_emission, *, per_capita=None, tree_count=None, extras=None):
+    metric_summaries = {}
+    if tree_count is not None:
+        metric_summaries["tree_count"] = {
+            "metric_key": "tree_count",
+            "label": "Tree Count",
+            "category": "ecology",
+            "unit": "",
+            "role": "context_indicator",
+            "report_section": "District Context and Sustainability Signals",
+            "value": float(tree_count),
+            "per_capita": None,
+            "growth": None,
+            "sustainability_related": True,
+        }
+    for metric_key, (label, category, role, value) in (extras or {}).items():
+        section = "Resource Overview" if category in {"waste", "water"} else "District Context and Sustainability Signals"
+        metric_summaries[metric_key] = {
+            "metric_key": metric_key,
+            "label": label,
+            "category": category,
+            "unit": "",
+            "role": role,
+            "report_section": section,
+            "value": float(value),
+            "per_capita": None,
+            "growth": None,
+            "sustainability_related": True,
+        }
+    return {
+        "district": district,
+        "total_emission": float(total_emission),
+        "gas_emission": float(total_emission) * 0.25,
+        "electricity_emission": float(total_emission) * 0.75,
+        "direct_emissions": 0.0,
+        "emission_unit": "kgCO2e",
+        "per_capita": per_capita,
+        "water_consumption": 0.0,
+        "growth": None,
+        "warnings": [],
+        "metric_summaries": metric_summaries,
+    }
+
 
 if __name__ == "__main__":
     unittest.main()

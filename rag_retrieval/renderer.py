@@ -8,8 +8,53 @@ from pathlib import Path
 from typing import Iterable
 
 from .generation import _public_coverage_notes
+from .metric_semantics import metric_semantic_profile
 from .report_metrics import public_metrics
 from .report_models import GeneratedReport, ReportAssets
+
+
+_SIGNAL_RELATION_LABEL = {
+    "sink_offset": "Offsetting asset",
+    "driver": "Emission driver",
+    "pressure": "Resource pressure",
+    "context": "Context indicator",
+}
+_SIGNAL_DIRECTION_LABEL = {
+    "higher_better": "higher = better",
+    "higher_worse": "higher = worse",
+    "neutral": "context",
+}
+
+
+def _metric_signal(summary: dict, *, size_proxy: bool = False) -> str:
+    """Human-readable meaning of a discovered metric, derived generically from
+    its category/role — so any metric (waste, recycling, renewable, ...) gets a
+    'why it matters' label, not just a raw role string.
+
+    When the analytics layer has flagged the metric as size-correlated, the
+    nominal meaning is qualified so the table does not contradict the narrative.
+    """
+    profile = metric_semantic_profile(
+        category=summary.get("category"),
+        role=summary.get("role"),
+        metric_key=summary.get("metric_key"),
+        label=summary.get("label"),
+    )
+    relation = _SIGNAL_RELATION_LABEL.get(str(profile["relation"]), "Context indicator")
+    direction = _SIGNAL_DIRECTION_LABEL.get(str(profile["direction"]), "context")
+    if size_proxy:
+        # Concise so the per-district table stays compact; the full caveat is
+        # carried by the narrative (District Context / Data Quality).
+        return f"{relation} — size-correlated here"
+    return f"{relation} ({direction})"
+
+
+def _spurious_metric_keys(report: GeneratedReport) -> set[str]:
+    """Metric keys the analytics layer flagged as near-perfectly correlated with
+    emissions (so they mostly reflect district size)."""
+    insights = getattr(report.report_input, "insights", None) or {}
+    correlations = ((insights.get("analytics") or {}).get("correlations")) or []
+    return {str(item.get("metric_key")) for item in correlations if item.get("strong")}
 
 
 def render_report(
@@ -65,8 +110,10 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
         f"<section><h2>{html.escape(chart['title'])}</h2><img class=\"chart\" src=\"{html.escape(_image_src(chart['path']))}\" /></section>"
         for chart in report.charts
     )
+    spurious = _spurious_metric_keys(report)
     metric_rows = "\n".join(_metric_rows(report.report_input.structured_results))
-    additional_metric_rows = "\n".join(_additional_metric_rows(report.report_input.structured_results))
+    additional_metric_rows = "\n".join(_additional_metric_rows(report.report_input.structured_results, spurious))
+    emission_unit = html.escape(_emission_unit(report.report_input.structured_results))
     ibb_logo = _html_logo(assets.ibb_logo_path, "IBB logo")
 
     return f"""<!doctype html>
@@ -119,7 +166,7 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
   <section>
     <h2>District-Level Sustainability Indicators</h2>
     <table>
-      <tr><th>District</th><th>Total emissions</th><th>Natural gas</th><th>Electricity</th><th>Water</th><th>Direct</th><th>Growth</th></tr>
+      <tr><th>District</th><th>Total emissions ({emission_unit})</th><th>Natural gas ({emission_unit})</th><th>Electricity ({emission_unit})</th><th>Water (m³)</th><th>Direct</th><th>Growth</th></tr>
       {metric_rows}
     </table>
   </section>
@@ -127,7 +174,7 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
   <section>
     <h2>Additional Sustainability Metrics</h2>
     <table>
-      <tr><th>District</th><th>Metric</th><th>Value</th><th>Role</th><th>Section</th></tr>
+      <tr><th>District</th><th>Metric</th><th>Value</th><th>Signal</th><th>Section</th></tr>
       {additional_metric_rows or '<tr><td colspan="5" class="muted">No additional sustainability metrics were detected.</td></tr>'}
     </table>
   </section>
@@ -190,7 +237,7 @@ def render_pdf(report: GeneratedReport, output_path: str | Path, assets: ReportA
         if index:
             story.append(Spacer(1, 0.2 * cm))
         story.append(table)
-    additional_metric_tables = _additional_metric_tables(report.report_input.structured_results, small)
+    additional_metric_tables = _additional_metric_tables(report.report_input.structured_results, small, _spurious_metric_keys(report))
     if additional_metric_tables:
         story.append(Spacer(1, 0.3 * cm))
         story.append(Paragraph("Additional Sustainability Metrics", styles["Heading2"]))
@@ -201,6 +248,14 @@ def render_pdf(report: GeneratedReport, output_path: str | Path, assets: ReportA
 
     doc.build(story)
     return Path(output_path)
+
+
+def _emission_unit(structured_results: Iterable[dict]) -> str:
+    for item in public_metrics(list(structured_results)):
+        unit = str(item.get("emission_unit") or "").strip()
+        if unit:
+            return unit
+    return "kgCO2e"
 
 
 def _metric_rows(structured_results: Iterable[dict]) -> list[str]:
@@ -225,7 +280,8 @@ def _coverage_notes(report: GeneratedReport) -> list[str]:
 
 
 def _metric_table_rows(structured_results: list[dict]) -> list[list[object]]:
-    rows: list[list[object]] = [["District", "Total", "Natural gas", "Electricity", "Water", "Direct", "Growth"]]
+    unit = _emission_unit(structured_results)
+    rows: list[list[object]] = [["District", f"Total ({unit})", f"Natural gas ({unit})", f"Electricity ({unit})", "Water (m³)", "Direct", "Growth"]]
     for data in public_metrics(structured_results):
         rows.append(
             [
@@ -264,7 +320,8 @@ def _metric_tables(structured_results: list[dict], small):
     return tables
 
 
-def _additional_metric_rows(structured_results: Iterable[dict]) -> list[str]:
+def _additional_metric_rows(structured_results: Iterable[dict], spurious: set[str] | None = None) -> list[str]:
+    spurious = spurious or set()
     rows = []
     for item in public_metrics(list(structured_results)):
         for metric_key, summary in sorted((item.get("metric_summaries") or {}).items()):
@@ -278,15 +335,16 @@ def _additional_metric_rows(structured_results: Iterable[dict]) -> list[str]:
                 f"<td>{html.escape(str(item.get('district', '')))}</td>"
                 f"<td>{html.escape(str(summary.get('label') or metric_key))}</td>"
                 f"<td>{_fmt_number(value)} {html.escape(str(summary.get('unit') or ''))}</td>"
-                f"<td>{html.escape(str(summary.get('role') or ''))}</td>"
+                f"<td>{html.escape(_metric_signal(summary, size_proxy=metric_key in spurious))}</td>"
                 f"<td>{html.escape(str(summary.get('report_section') or ''))}</td>"
                 "</tr>"
             )
     return rows
 
 
-def _additional_metric_table_rows(structured_results: list[dict]) -> list[list[str]]:
-    rows = [["District", "Metric", "Value", "Role", "Section"]]
+def _additional_metric_table_rows(structured_results: list[dict], spurious: set[str] | None = None) -> list[list[str]]:
+    spurious = spurious or set()
+    rows = [["District", "Metric", "Value", "Signal", "Section"]]
     for item in public_metrics(structured_results):
         for metric_key, summary in sorted((item.get("metric_summaries") or {}).items()):
             if metric_key in {"electricity", "natural_gas", "water"}:
@@ -299,18 +357,18 @@ def _additional_metric_table_rows(structured_results: list[dict]) -> list[list[s
                     str(item.get("district", "")),
                     str(summary.get("label") or metric_key),
                     f"{_fmt_number(value)} {summary.get('unit') or ''}".strip(),
-                    str(summary.get("role") or ""),
+                    _metric_signal(summary, size_proxy=metric_key in spurious),
                     str(summary.get("report_section") or ""),
                 ]
             )
     return rows
 
 
-def _additional_metric_tables(structured_results: list[dict], small):
+def _additional_metric_tables(structured_results: list[dict], small, spurious: set[str] | None = None):
     from reportlab.lib import colors
     from reportlab.platypus import Paragraph, Table
 
-    rows = _additional_metric_table_rows(structured_results)
+    rows = _additional_metric_table_rows(structured_results, spurious)
     if len(rows) == 1:
         return []
     header, body = rows[0], rows[1:]

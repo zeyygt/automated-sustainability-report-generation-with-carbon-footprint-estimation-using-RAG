@@ -5,6 +5,11 @@ from __future__ import annotations
 from statistics import median
 from typing import Any
 
+from .metric_semantics import metric_semantic_profile
+
+
+_CORE_METRIC_KEYS = {"electricity", "natural_gas", "water"}
+
 
 def build_report_recommendations(
     metrics: list[dict[str, Any]],
@@ -15,6 +20,7 @@ def build_report_recommendations(
     warnings = list(warnings or [])
     thresholds = _thresholds(metrics)
     benchmarks = _benchmark_context(metrics)
+    context_analytics = _context_analytics(metrics, insights)
     priority_lookup = {
         item.get("district"): float(item.get("score") or 0.0)
         for item in (insights.get("priority_districts") or [])
@@ -26,6 +32,7 @@ def build_report_recommendations(
             metric,
             thresholds,
             benchmarks,
+            context_analytics,
             priority_score=priority_lookup.get(metric.get("district"), 0.0),
         )
         for metric in metrics
@@ -44,7 +51,7 @@ def build_report_recommendations(
     commentary_profiles = _select_commentary_profiles(district_profiles, priority_order)
 
     municipality_focus = _municipality_focus(metrics, district_profiles, insights, commentary_profiles, benchmarks)
-    strategic_recommendations = _strategic_recommendations(metrics, district_profiles, warnings, benchmarks)
+    strategic_recommendations = _strategic_recommendations(metrics, district_profiles, warnings, benchmarks, context_analytics)
     data_quality_notes = _data_quality_notes(metrics, warnings)
 
     return {
@@ -83,34 +90,286 @@ def _benchmark_context(metrics: list[dict[str, Any]]) -> dict[str, Any]:
         [item for item in metrics if item.get("growth") is not None],
         key=lambda item: float(item.get("growth") or 0.0),
     )
-    tree_values = []
-    tree_rank_input = []
     direct_shares = []
     for item in metrics:
-        tree_value = _metric_value(item, "tree_count")
-        if tree_value > 0.0:
-            tree_values.append(tree_value)
-            tree_rank_input.append({"district": item.get("district"), "value": tree_value})
         total = float(item.get("total_emission") or 0.0)
         direct = float(item.get("direct_emissions") or 0.0)
         if total > 0.0 and direct > 0.0:
             direct_shares.append(direct / total)
-    tree_rank = _rank_map(tree_rank_input, key=lambda item: float(item.get("value") or 0.0))
     return {
         "district_count": len(metrics),
         "emission_rank": emission_rank,
         "growth_rank": growth_rank,
-        "tree_rank": tree_rank,
-        "tree_median": float(median(tree_values)) if tree_values else 0.0,
-        "tree_high": _upper_half_threshold(tree_values),
+        "context_stats": _context_stats(metrics),
         "direct_share_median": float(median(direct_shares)) if direct_shares else 0.0,
     }
+
+
+def _context_stats(metrics: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Rank every non-core (additional/context) metric across districts.
+
+    Generic by design: tree count, recycling rate, renewable share or any
+    user-supplied metric is ranked the same way, so no single indicator is a
+    special case.
+    """
+    values_by_key: dict[str, list[tuple[str, float]]] = {}
+    meta: dict[str, dict[str, Any]] = {}
+    for item in metrics:
+        district = str(item.get("district") or "")
+        for metric_key, summary in (item.get("metric_summaries") or {}).items():
+            if metric_key in _CORE_METRIC_KEYS:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0:
+                continue
+            values_by_key.setdefault(metric_key, []).append((district, value))
+            meta.setdefault(
+                metric_key,
+                {
+                    "label": str(summary.get("label") or metric_key.replace("_", " ").title()),
+                    "category": summary.get("category"),
+                    "role": summary.get("role"),
+                },
+            )
+    stats: dict[str, dict[str, Any]] = {}
+    for metric_key, pairs in values_by_key.items():
+        ranked = sorted(pairs, key=lambda pair: pair[1], reverse=True)
+        values = [value for _, value in pairs]
+        stats[metric_key] = {
+            "rank": {district: index + 1 for index, (district, _) in enumerate(ranked)},
+            "median": float(median(values)),
+            "count": len(pairs),
+            **meta[metric_key],
+        }
+    return stats
+
+
+def _context_analytics(metrics: list[dict[str, Any]], insights: dict[str, Any]) -> dict[str, Any]:
+    """Municipality-level anchors so each commentary can be framed comparatively
+    and stay consistent with the analytical findings (e.g. a context metric that
+    only tracks district size must not be sold as an independent advantage)."""
+    analytics = (insights or {}).get("analytics") or {}
+    emission_values = [
+        float(item.get("total_emission") or 0.0)
+        for item in metrics
+        if float(item.get("total_emission") or 0.0) > 0.0
+    ]
+    per_capita_values = [
+        float(item.get("per_capita"))
+        for item in metrics
+        if item.get("per_capita") is not None and float(item.get("per_capita")) > 0.0
+    ]
+    spurious = {
+        str(correlation.get("metric_key"))
+        for correlation in (analytics.get("correlations") or [])
+        if correlation.get("strong")
+    }
+    lever = analytics.get("energy_lever") or {}
+    return {
+        "emission_median": float(median(emission_values)) if emission_values else 0.0,
+        "per_capita_median": float(median(per_capita_values)) if per_capita_values else 0.0,
+        "emission_unit": _emission_unit(metrics),
+        "spurious_metric_keys": spurious,
+        "dominant_lever": lever.get("dominant"),
+        "electricity_share": lever.get("electricity_share"),
+    }
+
+
+def _emission_unit(metrics: list[dict[str, Any]]) -> str:
+    for item in metrics:
+        unit = str(item.get("emission_unit") or "").strip()
+        if unit:
+            return unit
+    return "kgCO2e"
+
+
+def _grounding_clause_en(total_emission: float, per_capita: float | None, ca: dict[str, Any]) -> str:
+    parts: list[str] = []
+    em_median = float(ca.get("emission_median") or 0.0)
+    if em_median > 0.0 and total_emission > 0.0:
+        ratio = total_emission / em_median
+        if ratio >= 1.15:
+            parts.append(f"its emissions run {(ratio - 1) * 100:.0f}% above the municipal median")
+        elif ratio <= 0.85:
+            parts.append(f"its emissions run {(1 - ratio) * 100:.0f}% below the municipal median")
+        else:
+            parts.append("its emissions sit close to the municipal median")
+    pc_median = float(ca.get("per_capita_median") or 0.0)
+    if per_capita and per_capita > 0.0 and pc_median > 0.0:
+        unit = ca.get("emission_unit") or "kgCO2e"
+        ratio = per_capita / pc_median
+        if ratio >= 1.15:
+            parts.append(f"while per-capita intensity is {(ratio - 1) * 100:.0f}% above the median at {per_capita:,.0f} {unit}/person")
+        elif ratio <= 0.85:
+            parts.append(f"while per-capita intensity is {(1 - ratio) * 100:.0f}% below the median at {per_capita:,.0f} {unit}/person")
+        else:
+            parts.append(f"with per-capita intensity near the median at {per_capita:,.0f} {unit}/person")
+    if not parts:
+        return ""
+    clause = ", ".join(parts)
+    return clause[0].upper() + clause[1:] + "."
+
+
+def _grounding_clause_tr(total_emission: float, per_capita: float | None, ca: dict[str, Any]) -> str:
+    parts: list[str] = []
+    em_median = float(ca.get("emission_median") or 0.0)
+    if em_median > 0.0 and total_emission > 0.0:
+        ratio = total_emission / em_median
+        if ratio >= 1.15:
+            parts.append(f"emisyonu belediye medyanının %{(ratio - 1) * 100:.0f} üzerindedir")
+        elif ratio <= 0.85:
+            parts.append(f"emisyonu belediye medyanının %{(1 - ratio) * 100:.0f} altındadır")
+        else:
+            parts.append("emisyonu belediye medyanına yakındır")
+    pc_median = float(ca.get("per_capita_median") or 0.0)
+    if per_capita and per_capita > 0.0 and pc_median > 0.0:
+        unit = ca.get("emission_unit") or "kgCO2e"
+        ratio = per_capita / pc_median
+        if ratio >= 1.15:
+            parts.append(f"kişi başı yoğunluğu ise medyanın %{(ratio - 1) * 100:.0f} üzerinde, {per_capita:,.0f} {unit}/kişi düzeyindedir")
+        elif ratio <= 0.85:
+            parts.append(f"kişi başı yoğunluğu ise medyanın %{(1 - ratio) * 100:.0f} altında, {per_capita:,.0f} {unit}/kişi düzeyindedir")
+        else:
+            parts.append(f"kişi başı yoğunluğu ise medyana yakın, {per_capita:,.0f} {unit}/kişi düzeyindedir")
+    if not parts:
+        return ""
+    clause = ", ".join(parts)
+    return clause[0].upper() + clause[1:] + "."
+
+
+def _append_clause(text: str, clause: str) -> str:
+    text = (text or "").strip()
+    clause = (clause or "").strip()
+    if not clause:
+        return text
+    if not text:
+        return clause
+    if not text.endswith((".", "!", "?")):
+        text = text + "."
+    return f"{text} {clause}"
+
+
+def _unique_asset_labels(district_profiles: list[dict[str, Any]], districts: set[str], *, limit: int = 3) -> str:
+    labels: list[str] = []
+    for profile in district_profiles:
+        if profile.get("district") not in districts:
+            continue
+        label = (profile.get("profile_context") or {}).get("lead_context_label")
+        if label and label not in labels:
+            labels.append(str(label))
+    return ", ".join(labels[:limit])
+
+
+def _sentence(text: str | None) -> str:
+    text = (text or "").strip().rstrip(".")
+    if not text:
+        return ""
+    return text[0].upper() + text[1:] + "."
+
+
+def _district_context_metrics(
+    metric: dict[str, Any],
+    context_stats: dict[str, dict[str, Any]],
+    spurious_metric_keys: set[str],
+) -> list[dict[str, Any]]:
+    """Resolve a district's additional metrics with their generic semantic
+    profile, rank and a size-proxy flag — applied identically to every metric."""
+    district = str(metric.get("district") or "")
+    items: list[dict[str, Any]] = []
+    for metric_key, summary in (metric.get("metric_summaries") or {}).items():
+        if metric_key in _CORE_METRIC_KEYS:
+            continue
+        value = float(summary.get("value") or 0.0)
+        if value <= 0.0:
+            continue
+        stats = context_stats.get(metric_key) or {}
+        semantics = metric_semantic_profile(
+            category=summary.get("category"),
+            role=summary.get("role"),
+            metric_key=metric_key,
+            label=summary.get("label"),
+        )
+        items.append(
+            {
+                "metric_key": metric_key,
+                "label": str(summary.get("label") or metric_key.replace("_", " ").title()),
+                "value": value,
+                "median": float(stats.get("median") or 0.0),
+                "rank": int((stats.get("rank") or {}).get(district) or 0),
+                "count": int(stats.get("count") or 0),
+                "size_proxy": metric_key in (spurious_metric_keys or set()),
+                "direction": semantics["direction"],
+                "relation": semantics["relation"],
+                "asset": bool(semantics["asset"]),
+                "significance_en": semantics["significance_en"],
+                "significance_tr": semantics["significance_tr"],
+            }
+        )
+    items.sort(key=lambda item: (item["rank"] or 999))
+    return items
+
+
+def _lead_context_asset(district_context_metrics: list[dict[str, Any]], district_count: int) -> dict[str, Any] | None:
+    """The genuine (non-size-proxy, higher-is-better) asset this district leads
+    on, if any. Used to decide whether 'context-rich' framing is warranted at
+    all — a size-proxy metric never qualifies."""
+    threshold = max(4, (district_count // 10) or 1)
+    genuine = [
+        item
+        for item in district_context_metrics
+        if item["asset"] and not item["size_proxy"] and item["rank"] and item["rank"] <= threshold
+    ]
+    genuine.sort(key=lambda item: item["rank"])
+    return genuine[0] if genuine else None
+
+
+def _context_metric_note_en(item: dict[str, Any] | None) -> str:
+    if not item or item.get("value", 0.0) <= 0.0:
+        return ""
+    label = item["label"]
+    rank_fragment = f" and ranks #{item['rank']}" if item.get("rank") and item["rank"] <= 10 else ""
+    if item["size_proxy"]:
+        return (
+            f"Although {label} ranks high, it moves almost in lockstep with emissions across districts, "
+            "so it reflects district size rather than an independent sustainability signal"
+        )
+    above = item["median"] > 0.0 and item["value"] >= item["median"]
+    position = "above" if above else "below"
+    if item["asset"]:
+        if above:
+            return f"{label}, an offsetting sustainability asset, sits {position} the municipal median{rank_fragment}, a genuine strength to build on"
+        return f"{label}, an offsetting sustainability asset, sits {position} the municipal median{rank_fragment}, so this strength is comparatively limited here"
+    if item["relation"] == "pressure":
+        return f"{label} sits {position} the municipal median{rank_fragment}, adding resource pressure that compounds the emissions picture"
+    return f"{label} sits {position} the municipal median{rank_fragment}"
+
+
+def _context_metric_note_tr(item: dict[str, Any] | None) -> str:
+    if not item or item.get("value", 0.0) <= 0.0:
+        return ""
+    label = item["label"]
+    rank_fragment = f" ve {item['rank']}. sırada yer alıyor" if item.get("rank") and item["rank"] <= 10 else ""
+    if item["size_proxy"]:
+        return (
+            f"{label} yüksek görünse de ilçeler genelinde emisyonla neredeyse birebir hareket etmektedir; "
+            "dolayısıyla bağımsız bir sürdürülebilirlik sinyalinden çok ilçe büyüklüğünü yansıtmaktadır"
+        )
+    above = item["median"] > 0.0 and item["value"] >= item["median"]
+    position = "üzerinde" if above else "altında"
+    if item["asset"]:
+        if above:
+            return f"Dengeleyici bir sürdürülebilirlik varlığı olan {label}, belediye medyanının {position}{rank_fragment}; üzerine inşa edilebilecek gerçek bir güçtür"
+        return f"Dengeleyici bir sürdürülebilirlik varlığı olan {label}, belediye medyanının {position}{rank_fragment}; dolayısıyla bu güç burada görece sınırlıdır"
+    if item["relation"] == "pressure":
+        return f"{label}, belediye medyanının {position}{rank_fragment}; emisyon tablosunu ağırlaştıran bir kaynak baskısı eklemektedir"
+    return f"{label}, belediye medyanının {position}{rank_fragment}"
 
 
 def _district_profile(
     metric: dict[str, Any],
     thresholds: dict[str, float],
     benchmarks: dict[str, Any],
+    context_analytics: dict[str, Any],
     *,
     priority_score: float,
 ) -> dict[str, Any]:
@@ -129,12 +388,16 @@ def _district_profile(
     electricity_share = (electricity_emission / energy_total) if energy_total > 0.0 else None
     gas_share = (gas_emission / energy_total) if energy_total > 0.0 else None
     direct_share = (direct_emissions / total_emission) if total_emission > 0.0 else 0.0
-    tree_value = _metric_value(metric, "tree_count")
     emission_rank = int((benchmarks.get("emission_rank") or {}).get(district) or 0)
     growth_rank = int((benchmarks.get("growth_rank") or {}).get(district) or 0)
-    tree_rank = int((benchmarks.get("tree_rank") or {}).get(district) or 0)
-    tree_median = float(benchmarks.get("tree_median") or 0.0)
     district_count = int(benchmarks.get("district_count") or 0)
+    spurious_metric_keys = context_analytics.get("spurious_metric_keys") or set()
+    district_context_metrics = _district_context_metrics(
+        metric, benchmarks.get("context_stats") or {}, spurious_metric_keys
+    )
+    lead_asset = _lead_context_asset(district_context_metrics, district_count)
+    lead_context = lead_asset or (district_context_metrics[0] if district_context_metrics else None)
+    has_genuine_context = any(not item["size_proxy"] for item in district_context_metrics)
 
     high_emission = total_emission > 0.0 and total_emission >= thresholds["emission_high"] > 0.0
     high_water = water > 0.0 and water >= thresholds["water_high"] > 0.0
@@ -143,7 +406,7 @@ def _district_profile(
     improving = (growth is not None and growth < 0.0) or (water_growth is not None and water_growth < 0.0)
     top_emission_core = emission_rank and emission_rank <= min(3, max(district_count, 1))
     rapid_growth_frontier = growth_rank and growth_rank <= max(3, district_count // 8 or 1) and emission_rank > max(8, district_count // 4)
-    ecological_context = tree_rank and tree_rank <= max(4, district_count // 10 or 1) and 4 <= emission_rank <= max(12, district_count // 2)
+    context_rich = bool(lead_asset) and bool(emission_rank) and 4 <= emission_rank <= max(12, district_count // 2)
     lower_pressure = emission_rank and emission_rank >= max(district_count - 2, 1)
     transition_watch = (
         growth is not None
@@ -162,7 +425,7 @@ def _district_profile(
         archetype_key = "rapid_growth_frontier"
     elif high_emission and direct_share >= max(float(benchmarks.get("direct_share_median") or 0.0) * 1.2, 0.05):
         archetype_key = "direct_emission_watch"
-    elif ecological_context:
+    elif context_rich:
         archetype_key = "ecological_context_district"
     elif transition_watch:
         archetype_key = "transition_watchlist"
@@ -172,7 +435,7 @@ def _district_profile(
         archetype_key = "efficiency_transition"
     elif lower_pressure:
         archetype_key = "lower_pressure_baseline"
-    elif context_metrics:
+    elif context_metrics and has_genuine_context:
         archetype_key = "ecology_signal_district"
     else:
         archetype_key = "baseline_monitor"
@@ -190,13 +453,16 @@ def _district_profile(
     )
     severity = _severity_for(archetype_key, score)
     signals = _signals_for(metric, resource_metrics=resource_metrics, context_metrics=context_metrics)
+    per_capita = _float_or_none(metric.get("per_capita"))
     profile_context = {
         "district_count": int(benchmarks.get("district_count") or 0),
         "emission_rank": emission_rank,
         "growth_rank": growth_rank,
-        "tree_rank": tree_rank,
-        "tree_value": tree_value,
-        "tree_median": tree_median,
+        "per_capita": per_capita,
+        "lead_context_label": lead_context["label"] if lead_context else None,
+        "has_genuine_asset": bool(lead_asset),
+        "context_note_en": _context_metric_note_en(lead_context),
+        "context_note_tr": _context_metric_note_tr(lead_context),
         "electricity_share": electricity_share,
         "gas_share": gas_share,
         "direct_share": direct_share,
@@ -205,6 +471,21 @@ def _district_profile(
         "direct_emissions": direct_emissions,
     }
     commentary_angle = _commentary_angle(archetype_key)
+
+    summary_en = _append_clause(
+        _append_clause(
+            _summary_en(district, archetype_key, total_emission, water, growth, water_growth, resource_metrics, context_metrics, warnings, profile_context),
+            _grounding_clause_en(total_emission, per_capita, context_analytics),
+        ),
+        _sentence(profile_context.get("context_note_en")),
+    )
+    summary_tr = _append_clause(
+        _append_clause(
+            _summary_tr(district, archetype_key, total_emission, water, growth, water_growth, resource_metrics, context_metrics, warnings, profile_context),
+            _grounding_clause_tr(total_emission, per_capita, context_analytics),
+        ),
+        _sentence(profile_context.get("context_note_tr")),
+    )
 
     return {
         "district": district,
@@ -217,12 +498,11 @@ def _district_profile(
         "total_emission": total_emission,
         "emission_rank": emission_rank,
         "growth_rank": growth_rank,
-        "tree_rank": tree_rank,
         "commentary_angle": commentary_angle,
         "headline_en": _headline_en(district, archetype_key, total_emission, water, growth, water_growth, context_metrics, profile_context),
         "headline_tr": _headline_tr(district, archetype_key, total_emission, water, growth, water_growth, context_metrics, profile_context),
-        "summary_en": _summary_en(district, archetype_key, total_emission, water, growth, water_growth, resource_metrics, context_metrics, warnings, profile_context),
-        "summary_tr": _summary_tr(district, archetype_key, total_emission, water, growth, water_growth, resource_metrics, context_metrics, warnings, profile_context),
+        "summary_en": summary_en,
+        "summary_tr": summary_tr,
         "recommended_actions_en": _actions_en(archetype_key, context_metrics, profile_context),
         "recommended_actions_tr": _actions_tr(archetype_key, context_metrics, profile_context),
         "signals": signals,
@@ -316,11 +596,45 @@ def _municipality_focus(
     return {"en": lines_en[:4], "tr": lines_tr[:4]}
 
 
+def _lever_instruments(lever: str | None) -> tuple[list[str], list[str]]:
+    if lever == "natural_gas":
+        return (
+            [
+                "building-envelope insulation and boiler upgrades in the highest-consuming public facilities",
+                "phased replacement of gas boilers with heat pumps where feasible",
+                "commissioning and controls tuning of existing heating systems",
+            ],
+            [
+                "en yüksek tüketimli kamu binalarında bina kabuğu yalıtımı ve kazan iyileştirmeleri",
+                "uygun yerlerde gazlı kazanların kademeli olarak ısı pompalarıyla değiştirilmesi",
+                "mevcut ısıtma sistemlerinin devreye alma ve kontrol ayarlarının yapılması",
+            ],
+        )
+    # Default to the electricity lever, which dominates most municipal profiles.
+    return (
+        [
+            "energy-efficiency retrofits of the largest municipal and public buildings (lighting, HVAC, controls)",
+            "conversion of street and public lighting to LED with smart controls",
+            "rooftop-solar power-purchase agreements on suitable public buildings",
+            "demand-side management and sub-metering of the heaviest municipal loads",
+            "a green-electricity clause in the municipality's electricity procurement",
+        ],
+        [
+            "en büyük belediye ve kamu binalarında enerji verimliliği iyileştirmeleri (aydınlatma, iklimlendirme, kontrol sistemleri)",
+            "sokak ve kamu aydınlatmasının akıllı kontrollü LED'e dönüştürülmesi",
+            "uygun kamu binalarının çatılarında güneş enerjisi alım anlaşmaları",
+            "en yüksek tüketimli belediye yüklerinde talep yönetimi ve alt sayaçlama",
+            "belediye elektrik alımına yeşil elektrik şartının eklenmesi",
+        ],
+    )
+
+
 def _strategic_recommendations(
     metrics: list[dict[str, Any]],
     district_profiles: list[dict[str, Any]],
     warnings: list[str],
     benchmarks: dict[str, Any],
+    context_analytics: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     emission_districts = [item["district"] for item in district_profiles if item["archetype_key"] == "carbon_pressure_core"][:5]
@@ -329,15 +643,30 @@ def _strategic_recommendations(
     ecology_districts = [item["district"] for item in district_profiles if item["archetype_key"] in {"ecological_context_district", "ecology_signal_district"}][:5]
     data_gap_districts = [item["district"] for item in district_profiles if item["archetype_key"] == "data_gap_watchlist"][:5]
 
+    lever = context_analytics.get("dominant_lever")
+    lever_label_en = "electricity" if lever != "natural_gas" else "natural gas"
+    lever_label_tr = "elektrik" if lever != "natural_gas" else "doğalgaz"
+    share = context_analytics.get("electricity_share") if lever != "natural_gas" else (1.0 - float(context_analytics.get("electricity_share") or 0.0))
+    share_pct = f"{float(share) * 100:.0f}%" if share else None
+    instruments_en, instruments_tr = _lever_instruments(lever)
+
     if emission_districts:
         joined = ", ".join(emission_districts)
+        lever_clause_en = f", and because {lever_label_en} drives about {share_pct} of energy emissions this is where the municipal total moves most" if share_pct else ""
+        lever_clause_tr = f"; çünkü enerji emisyonlarının yaklaşık {share_pct} kadarını {lever_label_tr} sürüklediğinden belediye toplamı en çok burada hareket eder" if share_pct else ""
         actions.append(
             {
                 "priority": "high",
                 "title_en": "Stabilize the current emissions core",
                 "title_tr": "Mevcut emisyon çekirdeğini stabilize et",
-                "rationale_en": f"{joined} already define the municipality's current carbon ceiling, so near-term operational and retrofit measures should start there.",
-                "rationale_tr": f"{joined} belediyenin mevcut karbon tavanını belirlediğinden, yakın dönem operasyonel ve retrofit önlemleri ilk olarak burada başlamalıdır.",
+                "rationale_en": f"{joined} already define the municipality's current carbon ceiling{lever_clause_en}.",
+                "rationale_tr": f"{joined} belediyenin mevcut karbon tavanını belirlemektedir{lever_clause_tr}.",
+                "instruments_en": instruments_en[:4],
+                "instruments_tr": instruments_tr[:4],
+                "sequence_en": f"Begin in the first program cycle, starting with the three largest loads in {joined}, then extend to the rest of the core.",
+                "sequence_tr": f"İlk program döngüsünde, {joined} içindeki en büyük üç yükten başlayarak başlat; ardından çekirdeğin geri kalanına genişlet.",
+                "target_en": "Adopt a council-approved per-capita emissions-reduction pathway for each core district with quarterly tracking, rather than relying on one-off measures.",
+                "target_tr": "Her çekirdek ilçe için, tek seferlik önlemler yerine çeyreklik takipli, meclis onaylı bir kişi başı emisyon azaltım patikası benimse.",
                 "districts": emission_districts,
             }
         )
@@ -346,10 +675,24 @@ def _strategic_recommendations(
         actions.append(
             {
                 "priority": "high" if not actions else "medium",
-                "title_en": "Monitor the fast-growth frontier before it becomes the next emissions core",
-                "title_tr": "Hızlı büyüme hattını yeni emisyon çekirdeğine dönüşmeden izle",
-                "rationale_en": f"{joined} are not today's heaviest emitters, but their growth trajectory suggests where future pressure may accumulate first.",
-                "rationale_tr": f"{joined} bugün en yüksek emisyonlu ilçe grubu değildir; ancak büyüme eğrileri gelecekte baskının ilk birikeceği alanları işaret etmektedir.",
+                "title_en": "Get ahead of the fast-growth frontier before it becomes the next emissions core",
+                "title_tr": "Hızlı büyüme hattını, yeni emisyon çekirdeğine dönüşmeden önüne geç",
+                "rationale_en": f"{joined} are not today's heaviest emitters, but their trajectory shows where future pressure will accumulate first, where prevention is cheaper than retrofit.",
+                "rationale_tr": f"{joined} bugün en yüksek emisyonlu ilçeler değildir; ancak eğilimleri gelecekteki baskının ilk birikeceği ve önlemenin retrofit'ten ucuz olduğu yerleri göstermektedir.",
+                "instruments_en": [
+                    "embed energy-efficiency standards into new-development permitting and municipal procurement",
+                    "install metering early so consumption is visible before it locks in",
+                    "deploy demand-management and tariff incentives ahead of the next growth wave",
+                ],
+                "instruments_tr": [
+                    "yeni gelişim izinlerine ve belediye satın almalarına enerji verimliliği standartları yerleştir",
+                    "tüketim yerleşmeden görünür olması için erken sayaçlama kur",
+                    "bir sonraki büyüme dalgasından önce talep yönetimi ve tarife teşvikleri devreye al",
+                ],
+                "sequence_en": "Act in parallel with the core program, in the next 12 months, while these districts are still preventable rather than entrenched.",
+                "sequence_tr": "Bu ilçeler hâlâ önlenebilir aşamadayken, çekirdek programla paralel olarak önümüzdeki 12 ay içinde harekete geç.",
+                "target_en": f"Keep each frontier district's per-capita intensity below the current emissions core's level, and re-check the trajectory at the next reporting cycle.",
+                "target_tr": "Her hat ilçesinin kişi başı yoğunluğunu mevcut emisyon çekirdeğinin seviyesinin altında tut ve eğilimi bir sonraki raporlama döngüsünde yeniden kontrol et.",
                 "districts": growth_districts,
             }
         )
@@ -358,22 +701,51 @@ def _strategic_recommendations(
         actions.append(
             {
                 "priority": "medium",
-                "title_en": "Build a transition watchlist for mid-tier districts",
-                "title_tr": "Orta bant ilçeler için geçiş izleme listesi oluştur",
-                "rationale_en": f"{joined} sit between the highest-pressure core and the lowest-pressure edge, so they are the best place to test scalable district programs.",
-                "rationale_tr": f"{joined}, en yüksek baskı çekirdeği ile en düşük baskı çevresi arasında yer aldığı için ölçeklenebilir ilçe programlarını denemek açısından en uygun grubu oluşturmaktadır.",
+                "title_en": "Pilot scalable programs in the mid-band districts",
+                "title_tr": "Orta bant ilçelerde ölçeklenebilir programları pilot uygula",
+                "rationale_en": f"{joined} sit between the highest-pressure core and the lowest-pressure edge, so they are the safest place to test a package before scaling it municipality-wide.",
+                "rationale_tr": f"{joined}, en yüksek baskı çekirdeği ile en düşük baskı çevresi arasında yer aldığından, bir paketi belediye geneline ölçeklemeden önce denemek için en güvenli alandır.",
+                "instruments_en": [
+                    "run one combined pilot of operational efficiency, monitoring, and a targeted capital upgrade",
+                    "measure before/after intensity so the effect is auditable",
+                    "codify what works into a repeatable template for similar mid-band districts",
+                ],
+                "instruments_tr": [
+                    "operasyonel verimlilik, izleme ve hedefli bir sermaye iyileştirmesini birleştiren tek bir pilot yürüt",
+                    "etkinin denetlenebilir olması için müdahale öncesi/sonrası yoğunluğu ölç",
+                    "işe yarayanı benzer orta bant ilçeler için tekrarlanabilir bir şablona dönüştür",
+                ],
+                "sequence_en": "Run as a 6–12 month pilot once the core program is under way, then decide on scaling.",
+                "sequence_tr": "Çekirdek program başladıktan sonra 6–12 aylık bir pilot olarak yürüt, ardından ölçekleme kararı ver.",
+                "target_en": "A documented pilot with measured intensity change that can be replicated across comparable districts.",
+                "target_tr": "Karşılaştırılabilir ilçelerde tekrarlanabilecek, ölçülmüş yoğunluk değişimi içeren belgelenmiş bir pilot.",
                 "districts": transition_districts,
             }
         )
     if ecology_districts:
         joined = ", ".join(ecology_districts)
+        asset_labels = _unique_asset_labels(district_profiles, set(ecology_districts))
+        asset_en = f" such as {asset_labels}" if asset_labels else ""
+        asset_tr = f" ({asset_labels} gibi)" if asset_labels else ""
         actions.append(
             {
                 "priority": "medium",
-                "title_en": "Use ecological context as a targeting layer, not a substitute for decarbonization",
-                "title_tr": "Ekolojik bağlamı, karbonsuzlaşmanın yerine değil onu hedeflemeyi güçlendiren bir katman olarak kullan",
-                "rationale_en": f"{joined} show stronger contextual sustainability signals, which should refine district packages rather than replace emissions action.",
-                "rationale_tr": f"{joined} daha güçlü bağlamsal sürdürülebilirlik sinyalleri göstermektedir; bu göstergeler emisyon aksiyonunun yerine geçmeden ilçe paketlerini daha hassas hale getirmelidir.",
+                "title_en": "Use standout sustainability assets as a targeting layer, not a substitute for decarbonization",
+                "title_tr": "Öne çıkan sürdürülebilirlik varlıklarını, karbonsuzlaşmanın yerine değil onu hedeflemeyi güçlendiren bir katman olarak kullan",
+                "rationale_en": f"{joined} lead on genuine sustainability assets{asset_en}, which should refine where district packages concentrate rather than replace emissions action.",
+                "rationale_tr": f"{joined}, gerçek sürdürülebilirlik varlıklarında{asset_tr} öne çıkmaktadır; bu varlıklar emisyon aksiyonunun yerine geçmeden ilçe paketlerinin nereye yoğunlaşacağını belirlemelidir.",
+                "instruments_en": [
+                    f"protect and expand {asset_labels or 'the standout asset'} through planning and public-space decisions",
+                    "use the asset to decide where the carbon package is spatially concentrated first",
+                ],
+                "instruments_tr": [
+                    f"{asset_labels or 'öne çıkan varlığı'} planlama ve kamusal alan kararlarıyla koru ve güçlendir",
+                    "karbon paketinin önce nereye yoğunlaşacağını belirlemek için bu varlığı kullan",
+                ],
+                "sequence_en": "Integrate into the district packages above rather than running as a separate workstream.",
+                "sequence_tr": "Ayrı bir iş kolu olarak değil, yukarıdaki ilçe paketlerinin içine entegre et.",
+                "target_en": "Each asset-led district keeps a no-net-loss rule on the asset while still following its emissions pathway.",
+                "target_tr": "Varlık öncülüğündeki her ilçe, emisyon patikasını izlerken varlıkta net kayıp olmaması kuralını sürdürür.",
                 "districts": ecology_districts,
             }
         )
@@ -386,6 +758,18 @@ def _strategic_recommendations(
                 "title_tr": "Bir sonraki döngü öncesinde su ve kapsama boşluğunu kapat",
                 "rationale_en": f"Coverage gaps remain visible across {joined}, and the absence of water data limits the municipality's ability to produce a fuller sustainability picture.",
                 "rationale_tr": f"{joined} genelinde kapsama boşlukları sürmektedir ve su verisinin yokluğu belediyenin daha bütünlüklü bir sürdürülebilirlik resmi üretmesini sınırlandırmaktadır.",
+                "instruments_en": [
+                    "stand up standardised district-level metering for water and any missing core metrics",
+                    "set a single data-collection template so the next cycle is comparable",
+                ],
+                "instruments_tr": [
+                    "su ve eksik çekirdek metrikler için standart, ilçe düzeyinde sayaçlama kur",
+                    "bir sonraki döngünün karşılaştırılabilir olması için tek bir veri toplama şablonu belirle",
+                ],
+                "sequence_en": "Complete before the next reporting cycle so coverage gaps do not carry forward.",
+                "sequence_tr": "Kapsama boşluklarının taşınmaması için bir sonraki raporlama döngüsünden önce tamamla.",
+                "target_en": "Full core-metric coverage (energy, water) across all districts in the next dataset.",
+                "target_tr": "Bir sonraki veri setinde tüm ilçelerde çekirdek metriklerin (enerji, su) tam kapsanması.",
                 "districts": data_gap_districts,
             }
         )
@@ -666,14 +1050,14 @@ def _summary_en(
     profile_context: dict[str, Any],
 ) -> str:
     direct_share = float(profile_context.get("direct_share") or 0.0)
-    tree_value = float(profile_context.get("tree_value") or 0.0)
-    tree_median = float(profile_context.get("tree_median") or 0.0)
-    tree_rank = profile_context.get("tree_rank")
     growth_rank = profile_context.get("growth_rank")
     emission_rank = profile_context.get("emission_rank")
-    context_labels = _metric_labels(context_metrics)
+    # Only let archetype branches speak positively about context metrics when a
+    # genuine (non-size-proxy) asset exists; otherwise the size-proxy caveat
+    # appended at the profile level carries the framing instead.
+    context_labels = _metric_labels(context_metrics) if profile_context.get("has_genuine_asset") else ""
     resource_labels = _metric_labels(resource_metrics)
-    tree_note = _tree_note_en(tree_value, tree_median, tree_rank)
+    tree_note = ""
 
     if archetype_key == "multi_pressure_hotspot":
         parts = [f"It combines {total_emission:,.2f} reported emissions with {water:,.2f} m3 of water demand"]
@@ -786,14 +1170,11 @@ def _summary_tr(
     profile_context: dict[str, Any],
 ) -> str:
     direct_share = float(profile_context.get("direct_share") or 0.0)
-    tree_value = float(profile_context.get("tree_value") or 0.0)
-    tree_median = float(profile_context.get("tree_median") or 0.0)
-    tree_rank = profile_context.get("tree_rank")
     growth_rank = profile_context.get("growth_rank")
     emission_rank = profile_context.get("emission_rank")
-    context_labels = _metric_labels(context_metrics)
+    context_labels = _metric_labels(context_metrics) if profile_context.get("has_genuine_asset") else ""
     resource_labels = _metric_labels(resource_metrics)
-    tree_note = _tree_note_tr(tree_value, tree_median, tree_rank)
+    tree_note = ""
 
     if archetype_key == "multi_pressure_hotspot":
         parts = [f"{total_emission:,.2f} düzeyindeki emisyonu {water:,.2f} m3 su talebiyle birlikte taşımaktadır"]
@@ -925,10 +1306,11 @@ def _actions_en(archetype_key: str, context_metrics: list[dict[str, Any]], profi
             "Use site-level audits to understand whether a small number of sources are driving the district profile.",
         ]
     if archetype_key == "ecological_context_district":
+        asset_label = profile_context.get("lead_context_label") or "the district's standout sustainability asset"
         return [
-            "Protect and expand ecological assets while pursuing the same decarbonization discipline applied in high-emission districts.",
-            "Use public-space, tree, or resilience indicators to decide where the district package should be spatially concentrated.",
-            "Treat ecological strength as a targeting advantage, not as a substitute for emissions reduction.",
+            f"Protect and build on {asset_label} while pursuing the same decarbonization discipline applied in high-emission districts.",
+            f"Use {asset_label} and other standout context indicators to decide where the district package should be spatially concentrated.",
+            "Treat this asset as a targeting advantage, not as a substitute for emissions reduction.",
         ]
     if archetype_key == "lower_pressure_baseline":
         return [
@@ -1131,22 +1513,6 @@ def _select_commentary_profiles(
 def _metric_labels(items: list[dict[str, Any]], *, limit: int = 2) -> str:
     labels = [str(item.get("label") or "").strip() for item in items if str(item.get("label") or "").strip()]
     return ", ".join(labels[:limit])
-
-
-def _tree_note_en(tree_value: float, tree_median: float, tree_rank: Any) -> str:
-    if tree_value <= 0.0:
-        return ""
-    qualifier = "above" if tree_median > 0.0 and tree_value >= tree_median else "below"
-    rank_fragment = f" and ranks #{int(tree_rank)} on tree count" if tree_rank and int(tree_rank) <= 10 else ""
-    return f"Tree Count sits {qualifier} the municipal median{rank_fragment}."
-
-
-def _tree_note_tr(tree_value: float, tree_median: float, tree_rank: Any) -> str:
-    if tree_value <= 0.0:
-        return ""
-    qualifier = "üzerindedir" if tree_median > 0.0 and tree_value >= tree_median else "altındadır"
-    rank_fragment = f" ve ağaç sayısında {int(tree_rank)}. sıradadır" if tree_rank and int(tree_rank) <= 10 else ""
-    return f"Ağaç sayısı belediye medyanının {qualifier}{rank_fragment}."
 
 
 def _severity_rank(value: str) -> int:

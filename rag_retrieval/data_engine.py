@@ -14,6 +14,12 @@ from .metric_registry import MetricDefinition, metric_registry
 from .text import normalize_for_search, search_tokens
 
 
+# Default reference emission factors are expressed in kgCO2e per consumption unit
+# (kgCO2e/kWh for electricity, kgCO2e/m3 for natural gas), so the computed totals
+# carry this unit unless a document overrides the methodology.
+EMISSION_UNIT = "kgCO2e"
+
+
 @dataclass(frozen=True, slots=True)
 class FormulaBinding:
     kind: str
@@ -63,6 +69,7 @@ class DataEngine:
         self.water_column = self.metric_columns.get("water")
         self.emissions_column = self._detect_emissions_column()
         self.growth_rate_column = self._detect_growth_rate_column()
+        self._growth_scale_divisor = self._compute_growth_scale_divisor()
         self.discovered_metrics: dict[str, DiscoveredMetric] = discover_metrics(
             self.dataframe,
             registry=self.metric_registry,
@@ -153,9 +160,11 @@ class DataEngine:
             if col in district_rows.columns:
                 values = self._numeric_series(district_rows[col]).dropna()
                 if not values.empty:
-                    raw = float(values.iloc[0])
-                    # normalize: if stored as whole-number percent (e.g. 5.0 = 5%), divide by 100
-                    growth = raw / 100.0 if abs(raw) > 1.5 else raw
+                    # Apply one column-wide scale to every district. A fixed
+                    # per-row threshold used to split a single column into
+                    # inconsistent regimes (one district read as 140%, its
+                    # neighbour as 1.4%); see _compute_growth_scale_divisor.
+                    growth = float(values.iloc[0]) / self._growth_scale_divisor
         warnings = self._analysis_warnings(
             electricity=electricity,
             gas=gas,
@@ -175,6 +184,8 @@ class DataEngine:
             "gas_emission": float(gas_emission),
             "direct_emissions": float(direct_emissions),
             "total_emission": float(total_emission),
+            "emission_unit": EMISSION_UNIT,
+            "population": float(population) if population is not None else None,
             "per_capita": self._safe_divide(total_emission, population),
             "per_household": self._safe_divide(total_emission, household_count),
             "growth": growth,
@@ -683,6 +694,24 @@ class DataEngine:
 
     def _detect_growth_rate_column(self) -> str | None:
         return self._detect_consumption_column(("growth", "büyüme", "degisim", "change_rate", "degisim_orani"))
+
+    def _compute_growth_scale_divisor(self) -> float:
+        """Decide a single column-wide scale for the growth-rate column.
+
+        The same rule must apply to every district. When most values sit well
+        above 1 the column is stored as whole-number percent (e.g. 5.0 = 5%)
+        and is divided by 100; otherwise the column is treated as a fraction
+        and kept as-is. Deciding once from the whole column avoids splitting a
+        uniform column (e.g. 1.39-1.56) into mixed 139% / 1.4% readings.
+        """
+        col = self.growth_rate_column
+        if not col or col not in getattr(self.dataframe, "columns", ()):
+            return 1.0
+        values = self._numeric_series(self.dataframe[col]).dropna()
+        if values.empty:
+            return 1.0
+        large_share = float((values.abs() > 1.5).mean())
+        return 100.0 if large_share >= 0.5 else 1.0
 
     def _detect_consumption_column(self, terms: tuple[str, ...]) -> str | None:
         best_column: str | None = None
