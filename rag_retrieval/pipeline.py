@@ -24,25 +24,165 @@ _DISTRICT_ALIAS_OVERRIDES = {
 }
 KNOWN_DISTRICTS = {}
 
+# Superlative / comparison terms (English + normalized Turkish) that signal a
+# cross-district ranking question such as "which district has the most trees?".
+_RANKING_TERMS = {
+    "highest",
+    "lowest",
+    "most",
+    "least",
+    "top",
+    "bottom",
+    "maximum",
+    "minimum",
+    "max",
+    "min",
+    "rank",
+    "ranking",
+    "greatest",
+    "largest",
+    "smallest",
+    "compare",
+    "comparison",
+    # Turkish, after normalize_for_search (ç→c, ö→o, ü→u, ı→i, ş→s)
+    "fazla",
+    "cok",
+    "yuksek",
+    "dusuk",
+    "az",
+    "buyuk",
+    "kucuk",
+    "siralama",
+    "sirala",
+    "maksimum",
+}
+
+# Threshold / filter cues ("more than 3000 trees", "below 500", "over X").
+# These also need the full per-district list so the assistant can answer from
+# grounded numbers instead of guessing a value.
+_COMPARISON_TERMS = {
+    "more",
+    "less",
+    "than",
+    "over",
+    "under",
+    "above",
+    "below",
+    "exceed",
+    "exceeds",
+    "exceeding",
+    "greater",
+    "fewer",
+    "between",
+    # Turkish (normalized)
+    "uzeri",
+    "ustu",
+    "alti",
+    "asan",
+    "gecen",
+    "arasi",
+}
+
+# Aggregate / enumerate cues ("total trees", "average emissions", "list all").
+_AGGREGATE_TERMS = {
+    "total",
+    "average",
+    "sum",
+    "mean",
+    "each",
+    "every",
+    "list",
+    "range",
+    "toplam",
+    "ortalama",
+    "her",
+    "liste",
+}
+
 
 def handle_query(query_text: str, session: "RetrievalSession") -> dict:
     query = session.retrieval.query_processor.process(query_text)
     route = route_query(query)
     district = extract_district(query)
 
+    # A cross-district question ("which district has the most/more than X?")
+    # names no single district, so the per-district analysis path returns
+    # nothing. Detect it and compute cross-district rankings instead so the
+    # assistant answers from grounded values rather than guessing.
+    rankings = []
+    if not district and _is_cross_district_query(query):
+        rankings = rank_data_engines(session, query)
+
     if route == "excel":
         structured_results = analyze_data_engines(session, district, query.source_hints)
-        return build_query_response(query_text, route, query, [], structured_results)
+        return build_query_response(query_text, route, query, [], structured_results, rankings)
 
     if route == "pdf":
         hits = session.search(query_text)
         retrieval_context = format_retrieval_hits(hits)
-        return build_query_response(query_text, route, query, retrieval_context, [])
+        return build_query_response(query_text, route, query, retrieval_context, [], rankings)
 
     hits = session.search(query_text)
     retrieval_context = format_retrieval_hits(hits)
     structured_results = analyze_data_engines(session, district, query.source_hints)
-    return build_query_response(query_text, route, query, retrieval_context, structured_results)
+    return build_query_response(query_text, route, query, retrieval_context, structured_results, rankings)
+
+
+def _is_ranking_query(query: "Query") -> bool:
+    terms = set(query.terms or ()) | set(getattr(query, "expanded_terms", ()) or ())
+    return bool(terms & _RANKING_TERMS)
+
+
+def _is_cross_district_query(query: "Query") -> bool:
+    """True for superlative, threshold/filter, or aggregate questions about
+    districts — all of which need the full per-district value list."""
+    terms = set(query.terms or ()) | set(getattr(query, "expanded_terms", ()) or ())
+    return bool(terms & (_RANKING_TERMS | _COMPARISON_TERMS | _AGGREGATE_TERMS))
+
+
+def rank_data_engines(session: "RetrievalSession", query: "Query") -> list[dict]:
+    """Rank districts by the metric(s) referenced in a cross-district query.
+
+    When the query clearly names a metric (e.g. "tree", "electricity"), only that
+    metric is ranked in full. Otherwise a compact top-5 ranking is returned for
+    every metric that has data, letting the assistant pick the relevant one
+    (this also bridges Turkish wording that has no English-aligned metric alias).
+    """
+    source_filter = _source_filter(query.source_hints)
+    terms = tuple(query.terms or ()) + tuple(getattr(query, "expanded_terms", ()) or ())
+
+    results: list[dict] = []
+    for doc_id, engine in getattr(session, "data_engines", {}).items():
+        if not engine or not getattr(engine, "districts", None):
+            continue
+        if len(engine.districts()) < 2:
+            continue
+
+        source = _source_info(session, doc_id)
+        if source_filter and source["source_type"] not in source_filter:
+            continue
+
+        matched = engine.match_report_metrics(terms)
+        if matched:
+            # Full per-district list so threshold questions ("more than X",
+            # "below Y") can be answered correctly in either direction.
+            blocks = engine.rank_report_metrics(matched, limit=None)
+        else:
+            blocks = engine.rank_report_metrics(limit=5)
+        if not blocks:
+            continue
+
+        results.append(
+            {
+                "doc_id": doc_id,
+                "filename": source["filename"],
+                "source_type": source["source_type"],
+                "parser": source["parser"],
+                "matched_metrics": matched,
+                "metric_rankings": blocks,
+            }
+        )
+    return results
 
 
 def extract_district(query: "Query") -> str | None:
@@ -95,13 +235,16 @@ def build_query_response(
     query: "Query",
     retrieval_context: list[dict],
     structured_results: list[dict],
+    rankings: list[dict] | None = None,
 ) -> dict:
-    warnings = _response_warnings(route, query, retrieval_context, structured_results)
+    rankings = rankings or []
+    warnings = _response_warnings(route, query, retrieval_context, structured_results, rankings)
     response = {
         "query": query_text,
         "route": route,
         "retrieval_context": retrieval_context,
         "structured_results": structured_results,
+        "rankings": rankings,
         "sources": _collect_sources(retrieval_context, structured_results),
         "warnings": warnings,
     }
@@ -146,6 +289,35 @@ def format_retrieval_hits(hits) -> list[dict]:
     return formatted
 
 
+def format_ranking_contexts(result: dict, max_sources: int = 3, max_metrics: int = 8) -> list[str]:
+    """Render cross-district rankings into grounding lines for the assistant.
+
+    For an explicitly matched metric the full district list is included (so the
+    assistant can answer threshold questions in either direction); the
+    all-metric fallback stays compact.
+    """
+    contexts: list[str] = []
+    for item in (result.get("rankings") or [])[:max_sources]:
+        matched = bool(item.get("matched_metrics"))
+        max_rows = 60 if matched else 6
+        for block in (item.get("metric_rankings") or [])[:max_metrics]:
+            rows = block.get("rankings") or []
+            if not rows:
+                continue
+            label = block.get("label") or block.get("metric_key")
+            unit = str(block.get("unit") or "").strip()
+            ordered = "; ".join(
+                f"{rank}. {row['district']}={float(row['value']):,.2f}{(' ' + unit) if unit else ''}"
+                for rank, row in enumerate(rows[:max_rows], start=1)
+            )
+            note = "" if len(rows) <= max_rows else f" … (+{len(rows) - max_rows} more)"
+            contexts.append(
+                f"District ranking by {label} — {len(rows)} districts, highest first "
+                f"(use these exact values; do not invent numbers): {ordered}{note}"
+            )
+    return contexts
+
+
 def _source_filter(source_hints) -> set[str] | None:
     hints = set(source_hints or ())
     if "pdf" in hints and "spreadsheet" not in hints:
@@ -172,11 +344,14 @@ def _source_info(session: "RetrievalSession", doc_id: str) -> dict:
     }
 
 
-def _response_warnings(route: str, query: "Query", retrieval_context: list[dict], structured_results: list[dict]) -> list[str]:
+def _response_warnings(route: str, query: "Query", retrieval_context: list[dict], structured_results: list[dict], rankings: list[dict] | None = None) -> list[str]:
+    rankings = rankings or []
     warnings: list[str] = []
-    if route in {"excel", "hybrid"} and not extract_district(query):
+    # A ranking query intentionally targets all districts, so a missing single
+    # district is expected rather than a problem when rankings were produced.
+    if route in {"excel", "hybrid"} and not extract_district(query) and not rankings:
         warnings.append("district_not_detected_for_structured_analysis")
-    if route in {"excel", "hybrid"} and not structured_results:
+    if route in {"excel", "hybrid"} and not structured_results and not rankings:
         warnings.append("no_structured_results")
     if route in {"pdf", "hybrid"} and not retrieval_context:
         warnings.append("no_retrieval_context")

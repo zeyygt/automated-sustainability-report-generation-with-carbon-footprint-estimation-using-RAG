@@ -128,6 +128,10 @@ class UiE2ETests(unittest.TestCase):
         self.assertEqual(self.page.locator("#generate-text").text_content().strip(), "Resolve Formula Inputs")
 
         self.page.locator("#generate-btn").click()
+        # Generating while blocked first surfaces the guidance dialog; its primary
+        # action opens the resolver.
+        self.page.locator("#action-dialog").wait_for(state="visible", timeout=10000)
+        self.page.locator("#action-dialog-primary").click()
         self.page.locator("#formula-resolver-modal").wait_for(state="visible", timeout=10000)
         self.page.locator("#formula-value-renewable").fill("100000")
         self.page.locator("#formula-resolver-save").click()
@@ -165,6 +169,9 @@ class UiE2ETests(unittest.TestCase):
             self.assertEqual(self.page.locator("#generate-text").text_content().strip(), "Resolve Methodology")
 
             self.page.locator("#generate-btn").click()
+            # Guidance dialog first, then its primary action opens the resolver.
+            self.page.locator("#action-dialog").wait_for(state="visible", timeout=10000)
+            self.page.locator("#action-dialog-primary").click()
             self.page.locator("#methodology-resolver-modal").wait_for(state="visible", timeout=10000)
             self.page.locator("#methodology-formula-0").select_option(label="methodology_b.pdf")
             self.page.locator("#methodology-factor-electricity").select_option(label="methodology_b.pdf (0.52)")

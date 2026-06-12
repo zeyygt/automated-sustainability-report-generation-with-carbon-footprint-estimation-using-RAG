@@ -19,6 +19,34 @@ from .text import normalize_for_search, search_tokens
 # carry this unit unless a document overrides the methodology.
 EMISSION_UNIT = "kgCO2e"
 
+# Tokens shared across many metric labels (units, generic nouns). They are
+# stripped before query/metric matching so a word like "consumption" does not
+# make every consumption metric match at once.
+_GENERIC_METRIC_TOKENS = {
+    "consumption",
+    "count",
+    "total",
+    "rate",
+    "use",
+    "usage",
+    "generated",
+    "supplied",
+    "treated",
+    "flow",
+    "value",
+    "values",
+    "amount",
+    "data",
+    "kwh",
+    "mwh",
+    "m3",
+    "ton",
+    "tons",
+    "tonnes",
+    "liter",
+    "litre",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class FormulaBinding:
@@ -59,6 +87,7 @@ class DataEngine:
         self.value_column = self._detect_value_column()
         self.metric_column = self._detect_metric_column()
         self.unit_column = self._detect_unit_column()
+        self.dataframe = self._derive_time_columns(self.dataframe)
         self.time_column = self._detect_time_column()
         self.metric_columns = {
             metric_key: self._detect_registry_metric_column(definition)
@@ -91,12 +120,16 @@ class DataEngine:
         self.custom_formula_bound_variables: dict[str, str] = {}
         self.custom_formula_missing_variables: list[str] = []
         self.custom_formula_status: str = "default"
+        # Time bucket (e.g. a year) dropped from the most recent trend comparison
+        # because it was under-sampled relative to the others; surfaced as a warning.
+        self._trend_excluded_period: object | None = None
         self._configure_custom_formula()
 
     def analyze_district(self, district: str) -> dict:
         if self.dataframe.empty or not self.district_column:
             return {}
 
+        self._trend_excluded_period = None
         district_rows = self._filter_district_rows(district)
         if district_rows.empty:
             return {}
@@ -177,6 +210,10 @@ class DataEngine:
             metric_summaries=metric_summaries,
         )
         warnings.extend(formula_warnings)
+        if self._trend_excluded_period is not None:
+            excluded = self._trend_excluded_period
+            label = str(int(excluded)) if isinstance(excluded, float) and excluded.is_integer() else str(excluded)
+            warnings.append(f"trend_excludes_incomplete_final_period:{label}")
 
         return {
             "district": str(district_rows[self.district_column].iloc[0]),
@@ -526,6 +563,100 @@ class DataEngine:
             "lowest_value": float(grouped.loc[lowest_district]),
         }
 
+    def match_report_metrics(self, terms) -> list[str]:
+        """Return report metric keys whose label/terms overlap the query terms.
+
+        Matching is generic: it compares normalized query tokens against each
+        metric's key, display name, source column/label and registry terms.
+        Purely generic stop tokens (``count``, ``consumption``, ``total`` …) are
+        excluded so unrelated metrics do not all match on a shared unit word.
+        """
+        def depluralize(tokens: set[str]) -> set[str]:
+            # Match singular/plural forms ("trees"→"tree", "emissions"→"emission")
+            # without over-trimming short tokens like "gas".
+            expanded: set[str] = set()
+            for token in tokens:
+                expanded.add(token)
+                if len(token) > 3 and token.endswith("s"):
+                    expanded.add(token[:-1])
+            return expanded
+
+        query_tokens = {
+            normalize_for_search(str(term))
+            for term in (terms or ())
+            if term
+        }
+        query_tokens = depluralize({token for token in query_tokens if token})
+        if not query_tokens:
+            return []
+
+        matches: list[str] = []
+        for metric_key, definition in self.report_metric_definitions.items():
+            tokens: set[str] = set()
+            sources = (
+                metric_key,
+                definition.display_name,
+                definition.source_column,
+                definition.source_label,
+                *(definition.metric_terms or ()),
+            )
+            for source in sources:
+                if not source:
+                    continue
+                normalized = normalize_for_search(str(source)).replace("_", " ")
+                tokens.update(search_tokens(normalized))
+            specific = depluralize({token for token in tokens if token} - _GENERIC_METRIC_TOKENS)
+            if specific & query_tokens:
+                matches.append(metric_key)
+        return matches
+
+    def rank_districts_by_metric(self, metric_key: str, limit: int | None = None) -> list[dict]:
+        """Rank every district by the summed total of a single report metric."""
+        if self.dataframe.empty or not self.district_column:
+            return []
+        if metric_key not in self.report_metric_definitions:
+            return []
+
+        rankings: list[dict] = []
+        for district in self.districts():
+            rows = self._filter_district_rows(district)
+            if rows.empty:
+                continue
+            value = self._metric_total(rows, metric_key)
+            population = self._population_for_district(district)
+            rankings.append(
+                {
+                    "district": district,
+                    "value": float(value),
+                    "per_capita": self._safe_divide(value, population),
+                }
+            )
+
+        rankings.sort(key=lambda item: item["value"], reverse=True)
+        if limit:
+            rankings = rankings[:limit]
+        return rankings
+
+    def rank_report_metrics(self, metric_keys=None, limit: int | None = None) -> list[dict]:
+        """Build per-metric district rankings, skipping metrics with no data."""
+        keys = list(metric_keys) if metric_keys else list(self.report_metric_definitions.keys())
+        blocks: list[dict] = []
+        for metric_key in keys:
+            ranking = self.rank_districts_by_metric(metric_key, limit=limit)
+            if not ranking or not any(item["value"] != 0.0 for item in ranking):
+                continue
+            definition = self.report_metric_definitions[metric_key]
+            blocks.append(
+                {
+                    "metric_key": metric_key,
+                    "label": definition.display_name,
+                    "unit": definition.unit,
+                    "sustainability_related": definition.sustainability_related,
+                    "rankings": ranking,
+                }
+            )
+        return blocks
+
     def formula_candidate_columns(self) -> list[str]:
         skip_columns = {
             self.district_column,
@@ -757,6 +888,42 @@ class DataEngine:
                 return column
         return None
 
+    def _derive_time_columns(self, dataframe):
+        """Derive a ``derived_year`` column from a date column when no explicit
+        year/month column exists, so dated rows (daily, weekly, raw dates) can
+        still be bucketed into a year-over-year trend. Genuine year/month data
+        is left untouched."""
+        if dataframe is None or dataframe.empty:
+            return dataframe
+        for column in dataframe.columns:
+            if set(column.split("_")) & {"year", "yil", "month", "ay"}:
+                return dataframe
+
+        date_column = self._detect_date_column(dataframe)
+        if not date_column:
+            return dataframe
+        parsed = self.pd.to_datetime(dataframe[date_column], errors="coerce")
+        if parsed.notna().mean() < 0.6:
+            return dataframe
+
+        result = dataframe.copy()
+        result["derived_year"] = parsed.dt.year
+        return result
+
+    def _detect_date_column(self, dataframe) -> str | None:
+        date_tokens = {"date", "tarih", "datetime", "timestamp", "period"}
+        for column in dataframe.columns:
+            if set(column.split("_")) & date_tokens or "date" in column or "tarih" in column:
+                return column
+        # Fall back to a text column whose values parse cleanly as dates.
+        for column in dataframe.columns:
+            if column == self.district_column or dataframe[column].dtype != object:
+                continue
+            parsed = self.pd.to_datetime(dataframe[column], errors="coerce")
+            if parsed.notna().mean() >= 0.8:
+                return column
+        return None
+
     def _normalize_dataframe(self, dataframe):
         if dataframe is None:
             return self.pd.DataFrame()
@@ -946,6 +1113,8 @@ class DataEngine:
             return None
 
         grouped = valid_rows.groupby("_data_engine_time")["_data_engine_value"].sum().sort_index()
+        counts = valid_rows.groupby("_data_engine_time").size().sort_index()
+        grouped = self._trim_incomplete_final_period(grouped, counts)
         if grouped.empty or len(grouped) < 2:
             return None
 
@@ -955,6 +1124,25 @@ class DataEngine:
         baseline_value = float(grouped.loc[baseline_key])
         current_value = float(grouped.iloc[-1])
         return self._safe_growth(baseline_value, current_value)
+
+    def _trim_incomplete_final_period(self, grouped, counts):
+        """Drop a trailing time bucket that is under-sampled versus the others.
+
+        A year-over-year trend must compare comparable periods. When the latest
+        bucket holds materially fewer observations than the typical bucket (e.g.
+        a final year with only 4 of 12 months, or one quarter of four), its
+        summed value is artificially low and fakes a decline. This is detected
+        generically from the per-bucket observation count, so genuinely yearly
+        data (one observation per bucket) is never trimmed.
+        """
+        if len(grouped) < 3:
+            return grouped
+        typical = float(counts.iloc[:-1].median())
+        last_count = float(counts.iloc[-1])
+        if typical > 0 and last_count < 0.75 * typical:
+            self._trend_excluded_period = grouped.index[-1]
+            return grouped.iloc[:-1]
+        return grouped
 
     def _growth_value_column(self, rows) -> str | None:
         candidates = (self.gas_column, self.electricity_column, self.water_column, self.emissions_column, self.value_column)
@@ -1047,7 +1235,7 @@ class DataEngine:
     @staticmethod
     def _is_time_column_name(column: str) -> bool:
         tokens = set(column.split("_"))
-        return bool(tokens & {"year", "yil", "month", "ay", "date", "period"})
+        return bool(tokens & {"year", "yil", "month", "ay", "date", "tarih", "datetime", "timestamp", "period"})
 
     def _emission_factor(self, key: str) -> float:
         try:

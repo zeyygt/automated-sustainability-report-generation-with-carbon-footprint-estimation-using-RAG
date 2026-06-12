@@ -244,6 +244,97 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(result["lowest_district"], "B")
         self.assertEqual(result["lowest_value"], 5.0)
 
+    def test_growth_excludes_undersampled_final_period(self):
+        # Full years of monthly data, then a partial final year (4 of 12 months).
+        # The trend must compare full years and not read the partial year as a drop.
+        rows = []
+        monthly = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]  # rising within a year
+        for year, scale in ((2020, 1.0), (2021, 1.1), (2022, 1.2)):
+            for month, base in enumerate(monthly, start=1):
+                rows.append({"Yıl": year, "Ay No": month, "İlçe": "ADALAR", "Dogalgaz Tüketim Miktarı (m3)": base * scale})
+        for month in range(1, 5):  # 2023: only 4 months
+            rows.append({"Yıl": 2023, "Ay No": month, "İlçe": "ADALAR", "Dogalgaz Tüketim Miktarı (m3)": monthly[month - 1] * 1.3})
+
+        result = DataEngine(pd.DataFrame(rows)).analyze_district("ADALAR")
+        # Real trend is rising; the partial 2023 must be dropped, not treated as a decline.
+        self.assertGreater(result["growth"], 0)
+        self.assertIn("trend_excludes_incomplete_final_period:2023", result["warnings"])
+
+    def test_year_derived_from_date_column_drives_trend(self):
+        # No year/month column — only raw dates. A year is derived so a
+        # year-over-year trend can still be computed (and the partial final
+        # year trimmed), without the date being mistaken for a metric.
+        rows = []
+        for year, value in ((2020, 100), (2021, 110), (2022, 120)):
+            for date in pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="MS"):
+                rows.append({"Tarih": date.strftime("%Y-%m-%d"), "İlçe": "ADALAR", "Gas (m3)": value})
+        for date in pd.date_range("2023-01-01", "2023-03-31", freq="MS"):  # partial final year
+            rows.append({"Tarih": date.strftime("%Y-%m-%d"), "İlçe": "ADALAR", "Gas (m3)": 200})
+
+        engine = DataEngine(pd.DataFrame(rows))
+        result = engine.analyze_district("ADALAR")
+
+        self.assertEqual(engine.time_column, "derived_year")
+        self.assertNotIn("derived_year", engine.report_metric_definitions)
+        self.assertGreater(result["growth"], 0)  # 2022 vs 2020 baseline, rising
+        self.assertIn("trend_excludes_incomplete_final_period:2023", result["warnings"])
+
+    def test_growth_keeps_complete_yearly_series(self):
+        # One observation per year — nothing is under-sampled, so no period is dropped.
+        dataframe = pd.DataFrame(
+            [
+                {"Yıl": 2020, "İlçe": "ADALAR", "Dogalgaz Tüketim Miktarı (m3)": 150},
+                {"Yıl": 2021, "İlçe": "ADALAR", "Dogalgaz Tüketim Miktarı (m3)": 180},
+                {"Yıl": 2022, "İlçe": "ADALAR", "Dogalgaz Tüketim Miktarı (m3)": 210},
+            ]
+        )
+        result = DataEngine(dataframe).analyze_district("ADALAR")
+        self.assertAlmostEqual(result["growth"], (210 - 150) / 150)
+        self.assertFalse(any("trend_excludes" in w for w in result["warnings"]))
+
+    def test_rank_districts_by_extra_metric(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "A", "Electricity Consumption (kWh)": 100, "Tree Count": 10},
+                {"District": "B", "Electricity Consumption (kWh)": 50, "Tree Count": 40},
+                {"District": "C", "Electricity Consumption (kWh)": 80, "Tree Count": 25},
+            ]
+        )
+        engine = DataEngine(dataframe)
+
+        ranking = engine.rank_districts_by_metric("tree_count")
+        self.assertEqual([row["district"] for row in ranking], ["B", "C", "A"])
+        self.assertEqual([row["value"] for row in ranking], [40.0, 25.0, 10.0])
+
+    def test_match_report_metrics_maps_query_terms_to_metric_keys(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "A", "Electricity Consumption (kWh)": 100, "Tree Count": 10},
+                {"District": "B", "Electricity Consumption (kWh)": 50, "Tree Count": 40},
+            ]
+        )
+        engine = DataEngine(dataframe)
+
+        self.assertIn("tree_count", engine.match_report_metrics(("tree",)))
+        # Plural query terms still match the singular metric label.
+        self.assertIn("tree_count", engine.match_report_metrics(("trees",)))
+        self.assertIn("electricity", engine.match_report_metrics(("electricity", "consumption")))
+        # A bare generic unit word must not match every metric at once.
+        self.assertEqual(engine.match_report_metrics(("count",)), [])
+
+    def test_rank_report_metrics_skips_empty_metrics(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "A", "Tree Count": 10},
+                {"District": "B", "Tree Count": 40},
+            ]
+        )
+        engine = DataEngine(dataframe)
+
+        labels = {block["label"] for block in engine.rank_report_metrics()}
+        self.assertIn("Tree Count", labels)
+        self.assertNotIn("Waste", labels)
+
     def test_custom_formula_applies_generic_column_binding(self):
         dataframe = pd.DataFrame(
             [

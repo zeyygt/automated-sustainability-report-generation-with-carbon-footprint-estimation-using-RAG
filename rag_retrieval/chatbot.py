@@ -18,7 +18,7 @@ def stream_chat_response(
     model: str | None = None,
 ) -> Generator[str, None, None]:
     """Yield response tokens for a conversational question grounded in RAG context."""
-    from .pipeline import handle_query
+    from .pipeline import handle_query, format_ranking_contexts
     from .generation import _load_local_env
 
     _load_local_env()
@@ -114,6 +114,8 @@ def stream_chat_response(
         if missing_variables:
             parts.append(f"formula_missing_variables={','.join(missing_variables)}")
         context_parts.append(", ".join(parts))
+
+    context_parts.extend(format_ranking_contexts(result))
 
     context = "\n\n".join(context_parts)
     is_english = language.strip().lower().startswith("en")

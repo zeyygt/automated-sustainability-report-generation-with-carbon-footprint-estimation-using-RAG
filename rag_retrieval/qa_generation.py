@@ -6,6 +6,7 @@ import json
 import os
 
 from .generation import _load_local_env
+from .pipeline import format_ranking_contexts
 from .pipeline import format_retrieval_hits
 from .pipeline import handle_query
 from .session import RetrievalSession
@@ -58,6 +59,8 @@ def build_answer_contexts(query_result: dict, max_retrieval: int = 5, max_struct
         if extra_metrics:
             parts.append("additional_metrics=" + "; ".join(extra_metrics[:4]))
         contexts.append(", ".join(parts))
+
+    contexts.extend(format_ranking_contexts(query_result))
 
     return contexts
 
