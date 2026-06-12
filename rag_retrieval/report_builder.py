@@ -12,6 +12,7 @@ from .session import RetrievalSession
 
 DEFAULT_REPORT_QUERIES = (
     "district-level natural gas consumption and emissions trend",
+    "district-level water consumption and water efficiency trend",
     "highest emission districts and sustainability priorities",
     "carbon footprint and per capita emission context",
     "energy consumption reduction opportunities",
@@ -97,10 +98,12 @@ def _detected_columns(engine) -> dict:
         "value": engine.value_column,
         "electricity": engine.electricity_column,
         "natural_gas": engine.gas_column,
+        "water": getattr(engine, "water_column", None),
         "direct_emissions": engine.emissions_column,
         "metric": engine.metric_column,
         "unit": engine.unit_column,
         "time": engine.time_column,
+        "metrics": dict(getattr(engine, "metric_columns", {}) or {}),
     }
 
 

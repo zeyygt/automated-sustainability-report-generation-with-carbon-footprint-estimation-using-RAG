@@ -4,6 +4,7 @@ from .config import ChunkingConfig, EmbeddingConfig, ParserConfig, RetrievalConf
 from .data_engine import DataEngine
 from .fact_extractor import FactExtractor
 from .models import Chunk, DocumentInput, ParsedDocument, ParsedElement, RetrievalHit
+from .metric_registry import MetricDefinition, metric_registry
 from .pipeline import analyze_data_engines, build_query_response, extract_district, format_retrieval_hits, handle_query
 from .ragas_evaluation import run_ragas_retrieval_evaluation
 from .ragas_generation_evaluation import run_ragas_generation_evaluation
@@ -21,6 +22,7 @@ __all__ = [
     "DataEngine",
     "FactExtractor",
     "GeneratedReport",
+    "MetricDefinition",
     "ParsedDocument",
     "ParsedElement",
     "ParserConfig",
@@ -37,6 +39,7 @@ __all__ = [
     "format_retrieval_hits",
     "generate_sustainability_report",
     "handle_query",
+    "metric_registry",
     "combine_dataframes",
     "parsed_tables_to_dataframe",
     "run_ragas_generation_evaluation",

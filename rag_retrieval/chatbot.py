@@ -82,6 +82,12 @@ def stream_chat_response(
             parts.append(f"natural_gas_emission={data['gas_emission']:,.2f}")
         if data.get("electricity_emission") is not None:
             parts.append(f"electricity_emission={data['electricity_emission']:,.2f}")
+        if data.get("water_consumption") is not None and float(data.get("water_consumption") or 0.0) > 0.0:
+            parts.append(f"water_consumption={float(data['water_consumption']):,.2f} m3")
+        if data.get("water_per_capita") is not None:
+            parts.append(f"water_per_capita={float(data['water_per_capita']):,.2f}")
+        if data.get("water_growth") is not None:
+            parts.append(f"water_growth={float(data['water_growth']) * 100:.1f}%")
         if data.get("growth") is not None:
             parts.append(f"growth={float(data['growth']) * 100:.1f}%")
         factors_used = data.get("emission_factors_used") or {}

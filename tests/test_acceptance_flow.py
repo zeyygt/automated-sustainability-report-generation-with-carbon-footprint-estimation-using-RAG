@@ -27,6 +27,23 @@ class AcceptanceFlowTests(unittest.TestCase):
                 return engine
         raise AssertionError("Expected at least one live data engine")
 
+    @staticmethod
+    def _water_dataset_csv(tmp_path: Path) -> Path:
+        csv_path = tmp_path / "water_metrics.csv"
+        districts = [
+            "Adalar", "Arnavutkoy", "Atasehir", "Avcilar", "Bagcilar", "Bahcelievler", "Bakirkoy", "Basaksehir",
+            "Bayrampasa", "Besiktas", "Beykoz", "Beylikduzu", "Beyoglu", "Buyukcekmece", "Catalca", "Cekmekoy",
+            "Esenler", "Esenyurt", "Eyupsultan", "Fatih", "Gaziosmanpasa", "Gungoren", "Kadikoy", "Kagithane",
+            "Kartal", "Kucukcekmece", "Maltepe", "Pendik", "Sancaktepe", "Sariyer", "Silivri", "Sisli", "Sile",
+            "Sultanbeyli", "Sultangazi", "Tuzla", "Umraniye", "Uskudar", "Zeytinburnu",
+        ]
+        rows = ["District,Year,Water Consumption (m3)"]
+        for index, district in enumerate(districts, start=1):
+            rows.append(f"{district},2023,{1000 + index * 10}")
+            rows.append(f"{district},2024,{1100 + index * 10}")
+        csv_path.write_text("\n".join(rows), encoding="utf-8")
+        return csv_path
+
     def test_factor_override_flow_supports_39_district_dataset_and_alias_query(self):
         session = self._build_session(
             [
@@ -114,6 +131,33 @@ class AcceptanceFlowTests(unittest.TestCase):
 
         self.assertEqual(len(report.report_input.structured_results), 39)
         self.assertNotIn("could not be fully applied", html)
+
+    def test_water_only_upload_generates_district_results_and_water_section(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            tmp_path = Path(tmp)
+            dataset = self._water_dataset_csv(tmp_path)
+            session = self._build_session([dataset])
+
+            self.assertEqual(session.report_generation_status, "ready")
+            engine = self._live_engine(session)
+            result = engine.analyze_district("Kadikoy")
+            self.assertGreater(result["water_consumption"], 0.0)
+            self.assertIn("water", result["metrics"])
+
+            query_result = handle_query("Kadikoy water consumption", session)
+            self.assertTrue(query_result["structured_results"])
+            self.assertGreater(query_result["structured_results"][0]["data"]["water_consumption"], 0.0)
+
+            report = generate_sustainability_report(
+                session,
+                title="Water Acceptance Report",
+                language="English",
+                output_dir=tmp_path / "reports",
+            )
+            html = Path(report.html_path).read_text(encoding="utf-8")
+
+        self.assertIn("Water Overview", report.ai_content_markdown)
+        self.assertIn("Water Overview", html)
 
 
 if __name__ == "__main__":

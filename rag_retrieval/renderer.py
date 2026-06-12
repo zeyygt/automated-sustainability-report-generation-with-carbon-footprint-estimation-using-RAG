@@ -111,9 +111,9 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
   {chart_html}
 
   <section>
-    <h2>District-Level Emissions Indicators</h2>
+    <h2>District-Level Sustainability Indicators</h2>
     <table>
-      <tr><th>District</th><th>Total emissions</th><th>Natural gas</th><th>Electricity</th><th>Direct</th><th>Growth</th></tr>
+      <tr><th>District</th><th>Total emissions</th><th>Natural gas</th><th>Electricity</th><th>Water</th><th>Direct</th><th>Growth</th></tr>
       {metric_rows}
     </table>
   </section>
@@ -167,7 +167,7 @@ def render_pdf(report: GeneratedReport, output_path: str | Path, assets: ReportA
             story.append(Spacer(1, 0.3 * cm))
 
     story.append(PageBreak())
-    story.append(Paragraph("District-Level Emissions Indicators", styles["Heading1"]))
+    story.append(Paragraph("District-Level Sustainability Indicators", styles["Heading1"]))
     metric_table = _metric_table(report.report_input.structured_results, styles, small)
     if metric_table:
         story.append(metric_table)
@@ -185,6 +185,7 @@ def _metric_rows(structured_results: Iterable[dict]) -> list[str]:
             f"<td>{_fmt_number(data.get('total_emission'))}</td>"
             f"<td>{_fmt_number(data.get('gas_emission'))}</td>"
             f"<td>{_fmt_number(data.get('electricity_emission'))}</td>"
+            f"<td>{_fmt_number(data.get('water_consumption'))}</td>"
             f"<td>{_fmt_number(data.get('direct_emissions'))}</td>"
             f"<td>{_fmt_growth(data.get('growth'))}</td>"
             "</tr>"
@@ -200,7 +201,7 @@ def _metric_table(structured_results: list[dict], styles, small):
     from reportlab.lib import colors
     from reportlab.platypus import Paragraph, Table, TableStyle
 
-    rows = [["District", "Total", "Natural gas", "Electricity", "Direct", "Growth"]]
+    rows = [["District", "Total", "Natural gas", "Electricity", "Water", "Direct", "Growth"]]
     for data in public_metrics(structured_results)[:22]:
         rows.append(
             [
@@ -208,6 +209,7 @@ def _metric_table(structured_results: list[dict], styles, small):
                 _fmt_number(data.get("total_emission")),
                 _fmt_number(data.get("gas_emission")),
                 _fmt_number(data.get("electricity_emission")),
+                _fmt_number(data.get("water_consumption")),
                 _fmt_number(data.get("direct_emissions")),
                 _fmt_growth(data.get("growth")),
             ]

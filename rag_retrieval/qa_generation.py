@@ -34,6 +34,12 @@ def build_answer_contexts(query_result: dict, max_retrieval: int = 5, max_struct
             parts.append(f"electricity_emission={data['electricity_emission']:,.2f}")
         if data.get("direct_emissions") is not None:
             parts.append(f"direct_emissions={data['direct_emissions']:,.2f}")
+        if data.get("water_consumption") is not None and float(data.get("water_consumption") or 0.0) > 0.0:
+            parts.append(f"water_consumption={float(data['water_consumption']):,.2f} m3")
+        if data.get("water_per_capita") is not None:
+            parts.append(f"water_per_capita={data['water_per_capita']:,.2f}")
+        if data.get("water_growth") is not None:
+            parts.append(f"water_growth={float(data['water_growth']) * 100:.2f}%")
         if data.get("per_capita") is not None:
             parts.append(f"per_capita={data['per_capita']:,.2f}")
         if data.get("per_household") is not None:

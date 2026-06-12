@@ -104,10 +104,11 @@ def deterministic_report_content(report_input: ReportInput) -> str:
 
 
 def _deterministic_report_content_en(metrics: list[dict]) -> str:
+    water_metrics = [item for item in metrics if float(item.get("water_consumption") or 0.0) > 0.0]
     lines = [
         "# Executive Summary",
-        "This sustainability report summarizes district-level energy consumption and emissions indicators for municipal decision-making.",
-        "The assessment highlights high-emission districts, observed trends, and priority actions for emissions reduction.",
+        "This sustainability report summarizes district-level energy, water, and emissions indicators for municipal decision-making.",
+        "The assessment highlights high-emission districts, water-use patterns, observed trends, and priority actions for resource management.",
         "",
         "# Emissions Overview",
     ]
@@ -126,27 +127,46 @@ def _deterministic_report_content_en(metrics: list[dict]) -> str:
     lines.extend(
         [
             "",
+            "# Water Overview",
+        ]
+    )
+    if water_metrics:
+        for item in water_metrics[:10]:
+            lines.append(
+                "- {district}: water consumption {water:,.2f} m3, growth {growth}.".format(
+                    district=item["district"],
+                    water=float(item.get("water_consumption") or 0.0),
+                    growth=_format_growth(item.get("water_growth")),
+                )
+            )
+    else:
+        lines.append("- Water consumption data was not available in the uploaded sustainability dataset.")
+
+    lines.extend(
+        [
+            "",
             "# District Analysis",
             "Districts with the highest total emissions should be prioritized for reduction planning and operational review.",
-            "Districts with positive growth require closer monitoring to identify the drivers of increasing consumption.",
+            "Districts with positive growth require closer monitoring to identify the drivers of increasing consumption or water demand.",
             "",
             "# Trend Assessment",
-            "Observed reductions should be supported with continued tracking, while missing data categories should be completed in future reporting cycles.",
+            "Observed reductions should be supported with continued tracking, while missing energy or water categories should be completed in future reporting cycles.",
             "",
             "# Priority Actions",
-            "- Expand district-level energy monitoring to improve coverage and continuity.",
+            "- Expand district-level energy and water monitoring to improve coverage and continuity.",
             "- Prioritize efficiency measures in districts with high total, per-capita, or per-household emissions.",
-            "- Track natural gas and electricity consumption separately to measure annual reduction impact.",
+            "- Track natural gas, electricity, and water consumption separately to measure annual reduction impact.",
         ]
     )
     return "\n".join(lines)
 
 
 def _deterministic_report_content_tr(metrics: list[dict]) -> str:
+    water_metrics = [item for item in metrics if float(item.get("water_consumption") or 0.0) > 0.0]
     lines = [
         "# Yönetici Özeti",
-        "Bu sürdürülebilirlik raporu, ilçe bazlı enerji tüketimi ve emisyon göstergelerini karar vericiler için özetler.",
-        "Analiz, yüksek emisyonlu alanları, değişim eğilimlerini ve öncelikli iyileştirme başlıklarını görünür kılar.",
+        "Bu sürdürülebilirlik raporu, ilçe bazlı enerji, su ve emisyon göstergelerini karar vericiler için özetler.",
+        "Analiz, yüksek emisyonlu alanları, su kullanım örüntülerini, değişim eğilimlerini ve öncelikli iyileştirme başlıklarını görünür kılar.",
         "",
         "# Emisyon Görünümü",
     ]
@@ -165,14 +185,33 @@ def _deterministic_report_content_tr(metrics: list[dict]) -> str:
     lines.extend(
         [
             "",
+            "# Su Görünümü",
+        ]
+    )
+    if water_metrics:
+        for item in water_metrics[:8]:
+            lines.append(
+                "- {district}: su tüketimi {water:,.2f} m3, büyüme {growth}.".format(
+                    district=item["district"],
+                    water=float(item.get("water_consumption") or 0.0),
+                    growth=_format_growth(item.get("water_growth")),
+                )
+            )
+    else:
+        lines.append("- Yüklenen veri setinde su tüketimi bilgisi bulunmadı.")
+
+    lines.extend(
+        [
+            "",
             "# İlçe Analizi",
             "En yüksek toplam emisyon değerine sahip ilçeler, azaltım önceliklendirmesinde ilk incelenmesi gereken alanlardır.",
-            "Pozitif büyüme gösteren ilçelerde tüketim artışının operasyonel nedenleri ayrıca değerlendirilmelidir.",
+            "Pozitif büyüme gösteren ilçelerde tüketim veya su talebi artışının operasyonel nedenleri ayrıca değerlendirilmelidir.",
             "",
             "# Öncelikli Aksiyonlar",
             "- Emisyon artışı görülen ilçelerde enerji verimliliği ve altyapı iyileştirme programları önceliklendirilmelidir.",
+            "- Su tüketimi yüksek ilçelerde kaçak azaltımı, verimlilik ve yeniden kullanım fırsatları değerlendirilmelidir.",
             "- Kişi başı ve hane başı emisyonu yüksek ilçelerde hedefli azaltım planları hazırlanmalıdır.",
-            "- Doğalgaz ve elektrik tüketimi ayrı ayrı izlenerek azaltım etkisi yıllık bazda takip edilmelidir.",
+            "- Doğalgaz, elektrik ve su tüketimi ayrı ayrı izlenerek azaltım etkisi yıllık bazda takip edilmelidir.",
             "",
             "# Değerlendirme Notları",
         ]
@@ -184,9 +223,9 @@ def _deterministic_report_content_tr(metrics: list[dict]) -> str:
 
 def _system_prompt(language: str) -> str:
     headings = (
-        "Executive Summary, Emissions Overview, District Analysis, Trend Assessment, Priority Actions"
+        "Executive Summary, Emissions Overview, Water Overview, District Analysis, Trend Assessment, Priority Actions"
         if _is_english(language)
-        else "Yönetici Özeti, Emisyon Görünümü, İlçe Analizi, Trend Değerlendirmesi, Öncelikli Aksiyonlar"
+        else "Yönetici Özeti, Emisyon Görünümü, Su Görünümü, İlçe Analizi, Trend Değerlendirmesi, Öncelikli Aksiyonlar"
     )
     return (
         "You are an expert sustainability report writer. "
@@ -205,11 +244,22 @@ def _system_prompt(language: str) -> str:
 
 
 def _compact_report_payload(report_input: ReportInput) -> dict[str, Any]:
+    metrics = public_metrics(report_input.structured_results)
     return {
         "title": report_input.title,
         "language": report_input.language,
-        "district_count": len(public_metrics(report_input.structured_results)),
-        "public_metrics": public_metrics(report_input.structured_results),
+        "district_count": len(metrics),
+        "public_metrics": metrics,
+        "water_metrics": [
+            {
+                "district": item["district"],
+                "water_consumption": item.get("water_consumption"),
+                "water_per_capita": item.get("water_per_capita"),
+                "water_growth": item.get("water_growth"),
+            }
+            for item in metrics
+            if float(item.get("water_consumption") or 0.0) > 0.0
+        ],
         "coverage_notes": _public_coverage_notes(report_input.warnings, report_input.language),
     }
 
@@ -229,6 +279,12 @@ def _public_coverage_notes(warnings: list[str], language: str) -> list[str]:
             "Some district assessments rely on electricity-focused indicators because natural gas consumption was not available."
             if english
             else "Bazı değerlendirmelerde doğalgaz tüketimi bulunmadığı için elektrik odaklı analiz yapılmıştır."
+        )
+    if "water_consumption_not_found" in joined:
+        notes.append(
+            "Some district assessments include limited water reporting because water consumption values were incomplete or missing."
+            if english
+            else "Bazı ilçe değerlendirmelerinde su tüketimi değerleri eksik olduğu için su raporlaması sınırlı kalmıştır."
         )
     if "direct_emissions_reported_separately" in joined:
         notes.append(

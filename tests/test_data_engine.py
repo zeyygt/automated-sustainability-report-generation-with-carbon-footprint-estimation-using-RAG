@@ -117,6 +117,38 @@ class DataEngineTests(unittest.TestCase):
         self.assertEqual(result["direct_emissions"], 250.0)
         self.assertEqual(result["total_emission"], 250.0)
 
+    def test_water_metric_is_detected_from_wide_column_and_reported_per_capita(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Year": 2022, "Water Consumption (m3)": 1200},
+                {"District": "Kadikoy", "Year": 2024, "Water Consumption (m3)": 1500},
+            ]
+        )
+
+        engine = DataEngine(dataframe)
+        result = engine.analyze_district("Kadikoy")
+
+        self.assertEqual(engine.water_column, "water_consumption_m3")
+        self.assertEqual(result["water_consumption"], 2700.0)
+        self.assertAlmostEqual(result["water_per_capita"], 2700.0 / 458573)
+        self.assertAlmostEqual(result["water_growth"], 0.25)
+        self.assertEqual(result["metrics"]["water"]["report_section"], "Water Overview")
+        self.assertNotIn("no_consumption_or_emissions_detected", result["warnings"])
+
+    def test_water_metric_is_detected_from_metric_value_table(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Year": 2023, "Metric": "Water Consumption", "Unit": "m3", "Value": 1400},
+                {"District": "Kadikoy", "Year": 2024, "Metric": "Water Consumption", "Unit": "m3", "Value": 1600},
+            ]
+        )
+
+        result = DataEngine(dataframe).analyze_district("Kadikoy")
+
+        self.assertEqual(result["water_consumption"], 3000.0)
+        self.assertAlmostEqual(result["water_growth"], (1600 - 1400) / 1400)
+        self.assertEqual(result["metrics"]["water"]["value"], 3000.0)
+
     def test_growth_uses_available_metric_for_mixed_fact_frames(self):
         dataframe = pd.DataFrame(
             [

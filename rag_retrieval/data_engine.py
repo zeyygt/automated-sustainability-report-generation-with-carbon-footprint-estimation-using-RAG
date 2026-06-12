@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .metric_registry import MetricDefinition, metric_registry
 from .text import normalize_for_search, search_tokens
 
 
@@ -25,6 +26,7 @@ class DataEngine:
     def __init__(self, dataframe, emission_factors: dict | None = None, custom_formula=None, custom_formula_inputs=None):
         self.pd = _import_pandas()
         self.reference_data = _load_reference_data()
+        self.metric_registry = metric_registry()
         base_factors: dict = dict(self.reference_data.get("emission_factors", {}))
         doc_factors: dict = dict(emission_factors or {})
         self.emission_factors = {**base_factors, **doc_factors}
@@ -40,12 +42,17 @@ class DataEngine:
         self.dataframe = self._normalize_wide_table(self._normalize_dataframe(dataframe))
         self.district_column = self._detect_district_column()
         self.value_column = self._detect_value_column()
-        self.electricity_column = self._detect_electricity_column()
-        self.gas_column = self._detect_gas_column()
-        self.emissions_column = self._detect_emissions_column()
         self.metric_column = self._detect_metric_column()
         self.unit_column = self._detect_unit_column()
         self.time_column = self._detect_time_column()
+        self.metric_columns = {
+            metric_key: self._detect_registry_metric_column(definition)
+            for metric_key, definition in self.metric_registry.items()
+        }
+        self.electricity_column = self.metric_columns.get("electricity")
+        self.gas_column = self.metric_columns.get("natural_gas")
+        self.water_column = self.metric_columns.get("water")
+        self.emissions_column = self._detect_emissions_column()
         self.growth_rate_column = self._detect_growth_rate_column()
         self.custom_formula_bindings: dict[str, FormulaBinding] = {}
         self.custom_formula_bound_variables: dict[str, str] = {}
@@ -61,18 +68,13 @@ class DataEngine:
         if district_rows.empty:
             return {}
 
-        electricity = self._sum_column(district_rows, self.electricity_column)
-        gas = self._sum_column(district_rows, self.gas_column)
-        electricity += self._sum_metric_value(
-            district_rows,
-            ("electricity", "electricity_consumption", "electric", "elektrik", "kwh", "mwh"),
-            self.electricity_column,
-        )
-        gas += self._sum_metric_value(
-            district_rows,
-            ("natural_gas", "natural_gas_consumption", "dogalgaz", "gas", "m3"),
-            self.gas_column,
-        )
+        population = self._population_for_district(district)
+        household_count = self._safe_divide(population, self.avg_household_size) if population is not None else None
+        metric_summaries = self._summarize_known_metrics(district_rows, population)
+
+        electricity = float(metric_summaries.get("electricity", {}).get("value") or 0.0)
+        gas = float(metric_summaries.get("natural_gas", {}).get("value") or 0.0)
+        water = float(metric_summaries.get("water", {}).get("value") or 0.0)
         direct_emissions = self._sum_column(district_rows, self.emissions_column)
         direct_emissions += self._sum_metric_value(
             district_rows,
@@ -87,6 +89,7 @@ class DataEngine:
             and self.metric_column is None
         ):
             gas = self._sum_column(district_rows, self.value_column)
+            metric_summaries.setdefault("natural_gas", {}).update({"value": float(gas)})
 
         electricity_emission = electricity * self._emission_factor("electricity")
         gas_emission = gas * self._emission_factor("natural_gas")
@@ -98,8 +101,7 @@ class DataEngine:
             if self.custom_formula_status == "ready":
                 total_emission, formula_status, formula_missing_values, formula_warnings = self._eval_custom_formula(
                     district_rows,
-                    electricity,
-                    gas,
+                    metric_summaries,
                     direct_emissions,
                 )
             else:
@@ -113,9 +115,7 @@ class DataEngine:
                 )
         else:
             total_emission = self._default_total_emission(electricity, gas, direct_emissions)
-        population = self._population_for_district(district)
-        household_count = self._safe_divide(population, self.avg_household_size) if population is not None else None
-        growth = self._growth_for_rows(district_rows)
+        growth = self._overall_growth_for_rows(district_rows, metric_summaries)
         if growth is None and self.growth_rate_column:
             col = self.growth_rate_column
             if col in district_rows.columns:
@@ -127,11 +127,13 @@ class DataEngine:
         warnings = self._analysis_warnings(
             electricity=electricity,
             gas=gas,
+            water=water,
             direct_emissions=direct_emissions,
             total_emission=total_emission,
             growth=growth,
             population=population,
             household_count=household_count,
+            metric_summaries=metric_summaries,
         )
         warnings.extend(formula_warnings)
 
@@ -145,6 +147,8 @@ class DataEngine:
             "per_household": self._safe_divide(total_emission, household_count),
             "growth": growth,
             "warnings": warnings,
+            "metrics": metric_summaries,
+            "available_metric_keys": [key for key, summary in metric_summaries.items() if summary.get("value") or summary.get("growth") is not None],
             "emission_factors_used": dict(self.emission_factors),
             "emission_factors_source": dict(self.emission_factors_source),
             "formula_expression": self.custom_formula.expression if self.custom_formula else None,
@@ -153,12 +157,17 @@ class DataEngine:
             "formula_missing_variables": list(self.custom_formula_missing_variables),
             "formula_missing_values": formula_missing_values,
             "formula_bound_variables": dict(self.custom_formula_bound_variables),
+            "water_consumption": water,
+            "water_per_capita": metric_summaries.get("water", {}).get("per_capita"),
+            "water_growth": metric_summaries.get("water", {}).get("growth"),
         }
 
-    def _eval_custom_formula(self, rows, electricity: float, gas: float, direct_emissions: float) -> tuple[float, str, list[str], list[str]]:
+    def _eval_custom_formula(self, rows, metric_summaries: dict[str, dict[str, object]], direct_emissions: float) -> tuple[float, str, list[str], list[str]]:
         """Evaluate the LLM-extracted formula with explicit variable validation."""
         from .llm_formula_extractor import safe_eval
 
+        electricity = float(metric_summaries.get("electricity", {}).get("value") or 0.0)
+        gas = float(metric_summaries.get("natural_gas", {}).get("value") or 0.0)
         variables: dict[str, float] = {
             # consumption aliases
             "electricity": electricity,
@@ -176,6 +185,15 @@ class DataEngine:
             # constants declared in the formula doc
             **self.custom_formula.constants,
         }
+        for metric_key, summary in metric_summaries.items():
+            if not self.metric_registry.get(metric_key, None):
+                continue
+            if not self.metric_registry[metric_key].default_formula_support:
+                continue
+            value = float(summary.get("value") or 0.0)
+            variables[metric_key] = value
+            variables[f"{metric_key}_consumption"] = value
+            variables[f"{metric_key}_value"] = value
 
         missing_values: list[str] = []
         for var, binding in self.custom_formula_bindings.items():
@@ -245,19 +263,28 @@ class DataEngine:
         self.custom_formula_status = "ready" if not self.custom_formula_missing_variables else "incomplete"
 
     def _builtin_formula_variables(self) -> set[str]:
-        return {
-            "electricity",
-            "electricity_consumption",
+        variables = {
             "gas",
             "gas_factor",
             "gas_emission_factor",
-            "natural_gas",
-            "natural_gas_consumption",
-            "natural_gas_factor",
             "direct_emissions",
             "electricity_factor",
             "electricity_emission_factor",
         }
+        for metric_key, definition in self.metric_registry.items():
+            if not definition.default_formula_support:
+                continue
+            variables.add(metric_key)
+            variables.add(f"{metric_key}_consumption")
+            variables.add(f"{metric_key}_value")
+        variables.update(
+            {
+                "natural_gas",
+                "natural_gas_consumption",
+                "natural_gas_factor",
+            }
+        )
+        return variables
 
     def _find_formula_binding(self, variable_name: str, hint: str) -> FormulaBinding | None:
         column = self._match_formula_column(variable_name, hint)
@@ -472,6 +499,107 @@ class DataEngine:
             candidates.append(str(column))
         return sorted(set(candidates))
 
+    def _summarize_known_metrics(self, rows, population: float | None) -> dict[str, dict[str, object]]:
+        summaries: dict[str, dict[str, object]] = {}
+        for metric_key, definition in self.metric_registry.items():
+            value = self._metric_total(rows, metric_key)
+            growth = self._growth_for_metric(rows, metric_key)
+            summaries[metric_key] = {
+                "metric_key": metric_key,
+                "label": metric_key.replace("_", " ").title(),
+                "category": definition.category,
+                "unit": definition.unit,
+                "role": definition.role,
+                "report_section": definition.report_section,
+                "value": float(value),
+                "per_capita": self._safe_divide(value, population),
+                "growth": growth,
+                "source_column": self.metric_columns.get(metric_key),
+            }
+        return summaries
+
+    def _metric_total(self, rows, metric_key: str) -> float:
+        specific_column = self.metric_columns.get(metric_key)
+        value = self._sum_metric_specific_column(rows, metric_key, specific_column)
+        value += self._sum_metric_value(rows, self._metric_aliases(metric_key, include_units=False), specific_column)
+        return float(value)
+
+    def _sum_metric_specific_column(self, rows, metric_key: str, column: str | None) -> float:
+        if not column or column not in rows.columns:
+            return 0.0
+        values = self._numeric_series(rows[column])
+        total = float(values.dropna().sum())
+        if total == 0.0:
+            return 0.0
+        normalized_column = normalize_for_search(column).replace(" ", "_")
+        if metric_key == "electricity" and "mwh" in normalized_column:
+            return total * 1000.0
+        if metric_key in {"water", "wastewater"} and any(token in normalized_column for token in ("liter", "litre", "liters", "litres")):
+            return total / 1000.0
+        return total
+
+    def _metric_aliases(self, metric_key: str, *, include_units: bool = True) -> tuple[str, ...]:
+        definition = self.metric_registry.get(metric_key)
+        if definition is None:
+            return (metric_key,)
+        aliases = [metric_key, metric_key.replace("_", " "), *definition.aliases]
+        normalized: list[str] = []
+        seen: set[str] = set()
+        ignored_unit_aliases = {"kwh", "mwh", "m3", "m³", "l", "ton", "tons", "tonnes"}
+        for alias in aliases:
+            value = normalize_for_search(alias)
+            if not include_units and value in ignored_unit_aliases:
+                continue
+            if value and value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        return tuple(normalized)
+
+    def _detect_registry_metric_column(self, definition: MetricDefinition) -> str | None:
+        best_column: str | None = None
+        best_score = 0.0
+        aliases = self._metric_aliases(definition.metric_key, include_units=False)
+        alias_tokens = [self._alias_tokens(alias) for alias in aliases]
+        for column in self.dataframe.columns:
+            if self._is_time_column_name(column):
+                continue
+            numeric_ratio = self._numeric_ratio(column)
+            if numeric_ratio <= 0:
+                continue
+
+            column_norm = normalize_for_search(column).replace(" ", "_")
+            column_tokens = set(search_tokens(column_norm))
+            if self.metric_column and column == self.value_column and definition.metric_key not in column_norm:
+                continue
+
+            alias_score = 0.0
+            if definition.metric_key in column_norm:
+                alias_score = max(alias_score, 4.0)
+            for alias, tokens in zip(aliases, alias_tokens):
+                alias_norm = alias.replace(" ", "_")
+                if column_norm == alias_norm:
+                    alias_score = max(alias_score, 10.0)
+                elif alias_norm in column_norm:
+                    alias_score = max(alias_score, 7.0)
+                elif tokens:
+                    overlap = len(tokens & column_tokens)
+                    if overlap == len(tokens):
+                        alias_score = max(alias_score, 6.0)
+                    elif overlap and overlap / len(tokens) >= 0.6:
+                        alias_score = max(alias_score, 4.5)
+            if alias_score <= 0.0:
+                continue
+
+            value_count = int(self._numeric_series(self.dataframe[column]).notna().sum())
+            score = alias_score + numeric_ratio + min(float(value_count), 25.0) / 5.0
+            if self._is_value_column_name(column):
+                score += 1.0
+            if best_column is None or score > best_score:
+                best_column = column
+                best_score = score
+
+        return best_column if best_score >= 4.0 else None
+
     def _detect_district_column(self) -> str | None:
         preferred_terms = ("district", "ilce", "region", "city", "location", "site", "facility", "municipality")
         for column in self.dataframe.columns:
@@ -636,26 +764,109 @@ class DataEngine:
         if self.value_column not in rows.columns or self.value_column == specific_column:
             return 0.0
 
-        metric_values = rows[self.metric_column].astype(str).map(normalize_for_search)
-        mask = metric_values.apply(lambda value: any(term in value for term in metric_terms))
+        metric_rows = self._metric_rows(rows, metric_terms)
+        if metric_rows.empty:
+            return 0.0
         if specific_column and specific_column in rows.columns:
             specific_values = self._numeric_series(rows[specific_column])
-            mask &= specific_values.isna()
-        if not mask.any():
+            metric_rows = metric_rows.loc[specific_values.loc[metric_rows.index].isna()]
+        if metric_rows.empty:
             return 0.0
 
-        values = self._numeric_series(rows.loc[mask, self.value_column])
-        if self.unit_column and self.unit_column in rows.columns:
-            units = rows.loc[mask, self.unit_column].astype(str).map(lambda value: normalize_for_search(value).replace(" ", ""))
+        values = self._numeric_series(metric_rows[self.value_column])
+        if self.unit_column and self.unit_column in metric_rows.columns:
+            units = metric_rows[self.unit_column].astype(str).map(lambda value: normalize_for_search(value).replace(" ", ""))
             values = values.where(units != "mwh", values * 1000)
         return float(values.dropna().sum())
+
+    def _metric_rows(self, rows, metric_terms: tuple[str, ...]):
+        if not self.metric_column or self.metric_column not in rows.columns:
+            return rows.iloc[0:0]
+        metric_values = rows[self.metric_column].astype(str).map(normalize_for_search)
+        mask = metric_values.apply(lambda value: self._metric_matches_aliases(value, metric_terms))
+        return rows.loc[mask]
+
+    def _metric_matches_aliases(self, metric_value: str, aliases: tuple[str, ...]) -> bool:
+        normalized_value = normalize_for_search(metric_value)
+        tokens = set(search_tokens(normalized_value))
+        for alias in aliases:
+            alias_value = normalize_for_search(alias)
+            if not alias_value:
+                continue
+            alias_tokens = self._alias_tokens(alias_value)
+            if self._alias_substring_match(alias_value, alias_tokens, normalized_value):
+                return True
+            if alias_tokens and alias_tokens <= tokens:
+                return True
+        return False
+
+    @staticmethod
+    def _alias_tokens(value: str) -> set[str]:
+        ignored = {
+            "consumption",
+            "use",
+            "usage",
+            "generated",
+            "generation",
+            "supplied",
+            "supply",
+            "total",
+            "municipal",
+            "clean",
+            "potable",
+            "tuketim",
+            "tuketimi",
+            "kullanim",
+            "kullanimi",
+        }
+        return {token for token in search_tokens(value) if token not in ignored}
+
+    @staticmethod
+    def _alias_substring_match(alias_value: str, alias_tokens: set[str], normalized_value: str) -> bool:
+        if not alias_tokens:
+            return False
+        if len(alias_tokens) == 1:
+            token = next(iter(alias_tokens))
+            if len(token) <= 2:
+                return False
+            return token in set(search_tokens(normalized_value))
+        pattern = r"\b" + re.escape(alias_value).replace(r"\ ", r"\s+") + r"\b"
+        return re.search(pattern, normalized_value) is not None
+
+    def _growth_for_metric(self, rows, metric_key: str) -> float | None:
+        if not self.time_column or self.time_column not in rows.columns:
+            return None
+
+        specific_column = self.metric_columns.get(metric_key)
+        if specific_column and specific_column in rows.columns:
+            return self._growth_from_series(rows, specific_column)
+
+        metric_rows = self._metric_rows(rows, self._metric_aliases(metric_key, include_units=False))
+        if metric_rows.empty or not self.value_column or self.value_column not in metric_rows.columns:
+            return None
+        return self._growth_from_series(metric_rows, self.value_column)
+
+    def _overall_growth_for_rows(self, rows, metric_summaries: dict[str, dict[str, object]]) -> float | None:
+        growth = self._growth_for_rows(rows)
+        if growth is not None:
+            return growth
+
+        for summary in metric_summaries.values():
+            if float(summary.get("value") or 0.0) <= 0.0:
+                continue
+            metric_growth = summary.get("growth")
+            if metric_growth is not None:
+                return float(metric_growth)
+        return None
 
     def _growth_for_rows(self, rows) -> float | None:
         column = self._growth_value_column(rows)
         if not column or column not in rows.columns or not self.time_column or self.time_column not in rows.columns:
             return None
+        return self._growth_from_series(rows, column)
 
-        values = self._numeric_series(rows[column])
+    def _growth_from_series(self, rows, value_column: str) -> float | None:
+        values = self._numeric_series(rows[value_column])
         times = self._numeric_series(rows[self.time_column])
         valid_rows = rows.assign(_data_engine_value=values, _data_engine_time=times).dropna(
             subset=["_data_engine_value", "_data_engine_time"]
@@ -675,7 +886,7 @@ class DataEngine:
         return self._safe_growth(baseline_value, current_value)
 
     def _growth_value_column(self, rows) -> str | None:
-        candidates = (self.gas_column, self.electricity_column, self.emissions_column, self.value_column)
+        candidates = (self.gas_column, self.electricity_column, self.water_column, self.emissions_column, self.value_column)
         for column in candidates:
             if not column or column not in rows.columns:
                 continue
@@ -688,23 +899,28 @@ class DataEngine:
         *,
         electricity: float,
         gas: float,
+        water: float,
         direct_emissions: float,
         total_emission: float,
         growth: float | None,
         population: float | None,
         household_count: float | None,
+        metric_summaries: dict[str, dict[str, object]],
     ) -> list[str]:
         warnings: list[str] = []
-        if electricity == 0.0:
+        has_resource_metrics = any(float(summary.get("value") or 0.0) > 0.0 for summary in metric_summaries.values())
+        if electricity == 0.0 and (gas > 0.0 or direct_emissions > 0.0 or not has_resource_metrics):
             warnings.append("electricity_consumption_not_found")
-        if gas == 0.0:
+        if gas == 0.0 and (electricity > 0.0 or direct_emissions > 0.0 or not has_resource_metrics):
             warnings.append("natural_gas_consumption_not_found")
-        if total_emission == 0.0 and direct_emissions == 0.0:
+        if total_emission == 0.0 and direct_emissions == 0.0 and not has_resource_metrics:
             warnings.append("no_consumption_or_emissions_detected")
         if direct_emissions > 0 and (electricity > 0 or gas > 0):
             warnings.append("direct_emissions_reported_separately_to_avoid_double_counting")
         elif direct_emissions > 0 and total_emission == direct_emissions:
             warnings.append("total_emission_uses_direct_emissions_only")
+        if water == 0.0 and metric_summaries.get("water", {}).get("source_column"):
+            warnings.append("water_consumption_not_found")
         if growth is None:
             warnings.append("growth_unavailable_missing_or_invalid_time_series")
         if population is None:
@@ -750,6 +966,10 @@ class DataEngine:
             "value",
             "waste",
             "water",
+            "wastewater",
+            "diesel",
+            "gasoline",
+            "fuel",
         )
         return any(term in column for term in value_terms)
 
@@ -842,11 +1062,22 @@ def _year_from_column(column: str) -> int | None:
 
 def _metric_column_from_year_column(column: str) -> str:
     column_without_year = re.sub(r"(?:19|20)\d{2}", "", column).strip("_")
-    if any(term in column_without_year for term in ("electric", "electricity", "kwh")):
+    tokens = set(column_without_year.split("_"))
+    if {"electric", "electricity", "kwh"} & tokens:
         return "electricity_consumption_kwh"
-    if any(term in column_without_year for term in ("gas", "natural_gas", "dogalgaz", "m3", "consumption")):
+    if {"water", "su", "potable", "clean", "cleanwater"} & tokens:
+        return "water_consumption_m3"
+    if "wastewater" in tokens or ("waste" in tokens and "water" in tokens) or ("atik" in tokens and "su" in tokens):
+        return "wastewater_m3"
+    if {"diesel", "motorin"} & tokens:
+        return "diesel_liters"
+    if {"gasoline", "petrol", "benzin"} & tokens:
+        return "gasoline_liters"
+    if {"waste", "atik", "atik"} & tokens:
+        return "waste_tonnes"
+    if {"gas", "natural", "naturalgas", "dogalgaz", "consumption", "m3"} & tokens:
         return "natural_gas_consumption_m3"
-    if any(term in column_without_year for term in ("emission", "emissions", "co2", "tco2e")):
+    if {"emission", "emissions", "co2", "tco2e"} & tokens:
         return "emissions"
     return "value"
 

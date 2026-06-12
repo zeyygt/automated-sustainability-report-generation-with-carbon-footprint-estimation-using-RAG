@@ -22,9 +22,18 @@ def generate_report_charts(report_input: ReportInput, output_dir: str | Path) ->
     output_path.mkdir(parents=True, exist_ok=True)
 
     charts: list[dict[str, str]] = []
-    charts.extend(_bar_chart_total_emissions(plt, metrics, output_path))
-    charts.extend(_bar_chart_growth(plt, metrics, output_path))
-    charts.extend(_stacked_components_chart(plt, metrics, output_path))
+    if any(
+        item["total_emission"] > 0.0
+        or item["gas_emission"] > 0.0
+        or item["electricity_emission"] > 0.0
+        or item["direct_emissions"] > 0.0
+        for item in metrics
+    ):
+        charts.extend(_bar_chart_total_emissions(plt, metrics, output_path))
+        charts.extend(_bar_chart_growth(plt, metrics, output_path))
+        charts.extend(_stacked_components_chart(plt, metrics, output_path))
+    if any(item["water_consumption"] > 0.0 for item in metrics):
+        charts.extend(_bar_chart_water_consumption(plt, metrics, output_path))
     return charts
 
 
@@ -39,7 +48,9 @@ def _metrics(report_input: ReportInput) -> list[dict]:
                 "gas_emission": float(data.get("gas_emission") or 0.0),
                 "electricity_emission": float(data.get("electricity_emission") or 0.0),
                 "direct_emissions": float(data.get("direct_emissions") or 0.0),
+                "water_consumption": float(data.get("water_consumption") or 0.0),
                 "growth": data.get("growth"),
+                "water_growth": data.get("water_growth"),
             }
         )
     return values
@@ -111,3 +122,21 @@ def _stacked_components_chart(plt, metrics: list[dict], output_dir: Path) -> lis
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return [{"title": "Emissions Components", "path": str(path)}]
+
+
+def _bar_chart_water_consumption(plt, metrics: list[dict], output_dir: Path) -> list[dict[str, str]]:
+    selected = [item for item in metrics if item["water_consumption"] > 0.0]
+    if not selected:
+        return []
+    selected = sorted(selected, key=lambda item: item["water_consumption"], reverse=True)[:12]
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.barh([item["label"] for item in selected], [item["water_consumption"] for item in selected], color="#2a9d8f")
+    ax.invert_yaxis()
+    ax.set_title("Water Consumption by District")
+    ax.set_xlabel("Water consumption (m3)")
+    ax.grid(axis="x", linestyle=":", alpha=0.35)
+    fig.tight_layout()
+    path = output_dir / "water_consumption_by_district.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return [{"title": "Water Consumption by District", "path": str(path)}]
