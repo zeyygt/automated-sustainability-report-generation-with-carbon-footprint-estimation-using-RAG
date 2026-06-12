@@ -149,6 +149,43 @@ class DataEngineTests(unittest.TestCase):
         self.assertAlmostEqual(result["water_growth"], (1600 - 1400) / 1400)
         self.assertEqual(result["metrics"]["water"]["value"], 3000.0)
 
+    def test_generic_sustainability_metrics_are_discovered_from_columns(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Year": 2023, "Tree Count": 42000, "Dam Occupancy (%)": 68, "Water Consumption (m3)": 1000},
+                {"District": "Kadikoy", "Year": 2024, "Tree Count": 45000, "Dam Occupancy (%)": 72, "Water Consumption (m3)": 1100},
+            ]
+        )
+
+        result = DataEngine(dataframe).analyze_district("Kadikoy")
+
+        self.assertIn("tree_count", result["metrics"])
+        self.assertIn("dam_occupancy", result["metrics"])
+        self.assertEqual(result["metrics"]["tree_count"]["role"], "context_indicator")
+        self.assertEqual(result["metrics"]["dam_occupancy"]["report_section"], "Water Overview")
+        self.assertEqual(result["metrics"]["tree_count"]["value"], 87000.0)
+        self.assertEqual(result["metrics"]["dam_occupancy"]["value"], 140.0)
+
+    def test_metric_override_can_remove_custom_metric_from_report_surface(self):
+        dataframe = pd.DataFrame(
+            [
+                {"District": "Kadikoy", "Year": 2024, "Tree Count": 42000, "Water Consumption (m3)": 1000},
+            ]
+        )
+
+        result = DataEngine(
+            dataframe,
+            metric_overrides={
+                "tree_count": {
+                    "sustainability_related": False,
+                    "classification_source": "user",
+                }
+            },
+        ).analyze_district("Kadikoy")
+
+        self.assertNotIn("tree_count", result["metrics"])
+        self.assertIn("water", result["metrics"])
+
     def test_growth_uses_available_metric_for_mixed_fact_frames(self):
         dataframe = pd.DataFrame(
             [

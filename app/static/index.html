@@ -121,6 +121,10 @@
           <span class="material-symbols-outlined text-sm" id="generate-icon">assessment</span>
           <span id="generate-text">Generate Report</span>
         </button>
+        <button id="review-metrics-btn" onclick="openDetectedMetricsResolver()" class="w-full border border-[#8aa4b8] text-white font-body-sm py-2 px-4 rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed">
+          <span class="material-symbols-outlined text-sm">analytics</span>
+          <span>Review Metrics</span>
+        </button>
       </div>
     </div>
   </div>
@@ -232,6 +236,7 @@
   <!-- Tabs -->
   <div class="flex border-b border-[#d9e2ec] flex-shrink-0" id="panel-tabs">
     <button onclick="switchTab('summary')" id="tab-summary" class="flex-1 py-3 text-[12px] font-bold text-secondary border-b-2 border-secondary bg-surface-container-low">SUMMARY</button>
+    <button onclick="switchTab('insights')" id="tab-insights" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">INSIGHTS</button>
     <button onclick="switchTab('charts')" id="tab-charts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">CHARTS</button>
     <button onclick="switchTab('districts')" id="tab-districts" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">DISTRICTS</button>
     <button onclick="switchTab('audit')" id="tab-audit" class="flex-1 py-3 text-[12px] font-bold text-outline hover:text-primary transition-colors">AUDIT</button>
@@ -240,6 +245,7 @@
   <!-- Tab content -->
   <div class="flex-1 overflow-auto">
     <div id="tab-content-summary" class="p-4 prose text-sm text-on-surface"></div>
+    <div id="tab-content-insights" class="hidden p-4 flex flex-col gap-4"></div>
     <div id="tab-content-charts" class="p-4 flex flex-col gap-4 hidden"></div>
     <div id="tab-content-districts" class="hidden">
       <table class="w-full text-[12px] border-collapse">
@@ -323,6 +329,34 @@
   </div>
 </div>
 
+<div id="detected-metrics-modal" class="hidden fixed inset-0 z-[70] bg-black/40 px-4 py-8">
+  <div class="mx-auto flex h-full w-full max-w-5xl items-center justify-center">
+    <div class="flex max-h-full w-full flex-col overflow-hidden rounded-xl border border-[#d9e2ec] bg-white shadow-xl">
+      <div class="flex items-start justify-between gap-4 border-b border-[#d9e2ec] px-6 py-5">
+        <div>
+          <h3 class="text-[18px] font-semibold text-primary">Detected Metrics</h3>
+          <p class="mt-1 text-[13px] text-outline">Review discovered sustainability metrics, confirm whether they belong in the report, and correct their classification when needed.</p>
+        </div>
+        <button onclick="closeDetectedMetricsResolver()" class="text-outline hover:text-error transition-colors">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+      <div id="detected-metrics-body" class="overflow-y-auto px-6 py-5"></div>
+      <div class="flex items-center justify-between gap-3 border-t border-[#d9e2ec] bg-[#f7fafc] px-6 py-4">
+        <p class="text-[12px] text-outline">Changes apply only inside the current browser session and immediately update report generation behavior.</p>
+        <div class="flex items-center gap-3">
+          <button onclick="closeDetectedMetricsResolver()" class="rounded-lg border border-[#d9e2ec] px-4 py-2 text-[13px] font-medium text-primary hover:bg-white transition-colors">
+            Cancel
+          </button>
+          <button id="detected-metrics-save" onclick="saveDetectedMetrics()" class="rounded-lg bg-secondary px-4 py-2 text-[13px] font-semibold text-white hover:opacity-90 transition-opacity">
+            Save Metric Review
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   // ── State ──────────────────────────────────────────────────────────────────
   const SESSION_STORAGE_KEY = 'sustainchat_session_id';
@@ -344,6 +378,7 @@
     methodology_resolution: {},
     factor_conflicts: [],
     formula_conflicts: [],
+    detected_metrics: [],
     calculation_audit: {},
   };
 
@@ -373,6 +408,13 @@
     if (!sessionId) return path;
     const joiner = path.includes('?') ? '&' : '?';
     return `${path}${joiner}session_id=${encodeURIComponent(sessionId)}`;
+  }
+
+  function sessionAssetUrl(path, cacheKey = null) {
+    const base = sessionUrl(path);
+    const token = cacheKey || Date.now();
+    const joiner = base.includes('?') ? '&' : '?';
+    return `${base}${joiner}_=${encodeURIComponent(String(token))}`;
   }
 
   async function ensureSession(force = false) {
@@ -478,6 +520,9 @@
       const res = await sessionFetch('/upload', { method: 'POST', body: formData });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      reportData = null;
+      closePanel();
+      document.getElementById('open-panel-btn').classList.add('hidden');
       updateFileList(data.files, true);
       await refreshSessionDiagnostics();
       setStatus('ready', 'Ready');
@@ -705,11 +750,13 @@
   }
 
   async function downloadPDF() {
-    window.open(sessionUrl('/report/pdf'), '_blank');
+    const cacheKey = reportData?.generated_at || Date.now();
+    window.open(sessionAssetUrl('/report/pdf', cacheKey), '_blank');
   }
 
   function openReportHtml() {
-    window.open(sessionUrl('/report/html'), '_blank');
+    const cacheKey = reportData?.generated_at || Date.now();
+    window.open(sessionAssetUrl('/report/html', cacheKey), '_blank');
   }
 
   // ── Right Panel ────────────────────────────────────────────────────────────
@@ -728,7 +775,7 @@
   }
 
   function switchTab(name) {
-    ['summary', 'charts', 'districts', 'audit'].forEach(t => {
+    ['summary', 'insights', 'charts', 'districts', 'audit'].forEach(t => {
       const btn = document.getElementById(`tab-${t}`);
       const content = document.getElementById(`tab-content-${t}`);
       if (t === name) {
@@ -747,13 +794,16 @@
       ? marked.parse(data.markdown)
       : '<p class="text-outline text-sm">No summary available.</p>';
 
+    renderInsightsPanel(data);
+
     // Charts
     const chartsEl = document.getElementById('tab-content-charts');
     if (data.charts && data.charts.length) {
+      const cacheKey = data.generated_at || Date.now();
       chartsEl.innerHTML = data.charts.map(c => `
         <div>
           <p class="font-body-sm font-semibold text-primary mb-2">${c.title}</p>
-          <img src="${sessionUrl(`/charts/${encodeURIComponent(c.filename)}`)}" class="w-full rounded border border-[#d9e2ec]" alt="${c.title}"/>
+          <img src="${sessionAssetUrl(`/charts/${encodeURIComponent(c.filename)}`, cacheKey)}" class="w-full rounded border border-[#d9e2ec]" alt="${c.title}"/>
         </div>`).join('');
     } else {
       chartsEl.innerHTML = '<p class="text-outline text-sm">No charts available.</p>';
@@ -782,6 +832,134 @@
     renderAuditPanel(sessionDiagnostics.calculation_audit || data.audit || {});
   }
 
+  function renderInsightsPanel(data) {
+    const root = document.getElementById('tab-content-insights');
+    if (!root) return;
+
+    const insights = data.insights || {};
+    const recommendations = data.recommendations || {};
+    const locale = (data.language || currentLanguage) === 'Turkish' ? 'tr' : 'en';
+    const municipality = insights.municipality || {};
+    const priorityDistricts = insights.priority_districts || [];
+    const municipalityFocus = (recommendations.municipality_focus || {})[locale] || [];
+    const districtCommentary = recommendations.priority_district_commentary || [];
+    const strategicRecommendations = recommendations.strategic_recommendations || [];
+    const dataQualityNotes = (recommendations.data_quality_notes || []).map(item => locale === 'tr' ? item.note_tr : item.note_en).filter(Boolean);
+
+    const snapshotCards = [
+      { label: locale === 'tr' ? 'İlçe Kapsamı' : 'District Coverage', value: municipality.district_count ?? '—' },
+      { label: locale === 'tr' ? 'Toplam Emisyon' : 'Total Emissions', value: municipality.total_emissions != null ? Number(municipality.total_emissions).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—' },
+      { label: locale === 'tr' ? 'Toplam Su' : 'Total Water', value: municipality.total_water_consumption != null ? Number(municipality.total_water_consumption).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—' },
+      { label: locale === 'tr' ? 'Kapsam Düzeyi' : 'Coverage Level', value: municipality.coverage_level || '—' },
+    ];
+
+    const focusHtml = municipalityFocus.length
+      ? `<ul class="space-y-2 text-[13px] text-on-surface">${municipalityFocus.map(item => `<li class="rounded-lg bg-white border border-[#d9e2ec] px-3 py-2">${escHtml(item)}</li>`).join('')}</ul>`
+      : `<p class="text-[13px] text-outline">${locale === 'tr' ? 'Henüz belediye geneli odak noktası üretilemedi.' : 'No municipality-wide focus was derived yet.'}</p>`;
+
+    const priorityHtml = priorityDistricts.length
+      ? priorityDistricts.slice(0, 6).map(item => `
+        <div class="rounded-lg border border-[#d9e2ec] bg-white p-3">
+          <div class="flex items-center justify-between gap-3">
+            <p class="text-[14px] font-semibold text-primary">${escHtml(item.district || '—')}</p>
+            <span class="rounded-full bg-[#eef5f9] px-2 py-1 text-[10px] font-semibold text-primary">${escHtml(String(item.score ?? ''))}</span>
+          </div>
+          <p class="mt-2 text-[12px] text-outline">
+            ${locale === 'tr' ? 'Emisyon:' : 'Emissions:'} ${item.total_emission != null ? Number(item.total_emission).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+            &nbsp;·&nbsp;
+            ${locale === 'tr' ? 'Su:' : 'Water:'} ${item.water_consumption != null ? Number(item.water_consumption).toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+          </p>
+        </div>`).join('')
+      : `<p class="text-[13px] text-outline">${locale === 'tr' ? 'Öncelikli ilçe bulunamadı.' : 'No priority districts identified.'}</p>`;
+
+    const commentaryHtml = districtCommentary.length
+      ? districtCommentary.map(item => {
+          const headline = locale === 'tr' ? item.headline_tr : item.headline_en;
+          const summary = locale === 'tr' ? item.summary_tr : item.summary_en;
+          const archetype = locale === 'tr' ? item.archetype_label_tr : item.archetype_label_en;
+          const actions = locale === 'tr' ? (item.recommended_actions_tr || []) : (item.recommended_actions_en || []);
+          const signals = item.signals || [];
+          const severityClass = item.severity === 'high'
+            ? 'bg-[#ffe6e6] text-[#8b1e3f]'
+            : item.severity === 'medium'
+              ? 'bg-[#fff3d6] text-[#8a5a00]'
+              : 'bg-[#eef5f9] text-primary';
+          return `
+            <article class="rounded-xl border border-[#d9e2ec] bg-white p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-[15px] font-semibold text-primary">${escHtml(item.district || '—')}</p>
+                  <p class="mt-1 text-[12px] text-outline">${escHtml(archetype || '')}</p>
+                </div>
+                <span class="rounded-full px-2 py-1 text-[10px] font-semibold uppercase ${severityClass}">${escHtml(item.severity || 'low')}</span>
+              </div>
+              <p class="mt-3 text-[13px] font-medium text-on-surface">${escHtml(headline || '')}</p>
+              <p class="mt-2 text-[13px] leading-5 text-outline">${escHtml(summary || '')}</p>
+              ${signals.length ? `
+                <div class="mt-3 flex flex-wrap gap-2">
+                  ${signals.slice(0, 4).map(signal => `
+                    <span class="rounded-full border border-[#d9e2ec] bg-[#fbfcfe] px-2.5 py-1 text-[11px] text-primary">
+                      ${escHtml(locale === 'tr' ? signal.label_tr : signal.label_en)}: ${escHtml(signal.value || '')}
+                    </span>`).join('')}
+                </div>` : ''}
+              ${actions.length ? `
+                <ul class="mt-3 list-disc space-y-1 pl-4 text-[12px] text-on-surface">
+                  ${actions.slice(0, 3).map(action => `<li>${escHtml(action)}</li>`).join('')}
+                </ul>` : ''}
+            </article>`;
+        }).join('')
+      : `<p class="text-[13px] text-outline">${locale === 'tr' ? 'İlçe yorumu üretilemedi.' : 'No district commentary available.'}</p>`;
+
+    const recommendationsHtml = strategicRecommendations.length
+      ? strategicRecommendations.map(item => `
+        <div class="rounded-lg border border-[#d9e2ec] bg-white p-3">
+          <div class="flex items-center justify-between gap-3">
+            <p class="text-[14px] font-semibold text-primary">${escHtml(locale === 'tr' ? item.title_tr : item.title_en)}</p>
+            <span class="rounded-full bg-[#eef5f9] px-2 py-1 text-[10px] font-semibold text-primary uppercase">${escHtml(item.priority || 'medium')}</span>
+          </div>
+          <p class="mt-2 text-[12px] leading-5 text-outline">${escHtml(locale === 'tr' ? item.rationale_tr : item.rationale_en)}</p>
+        </div>`).join('')
+      : `<p class="text-[13px] text-outline">${locale === 'tr' ? 'Stratejik öneri bulunamadı.' : 'No strategic recommendations available.'}</p>`;
+
+    const notesHtml = dataQualityNotes.length
+      ? `<ul class="list-disc space-y-1 pl-4 text-[12px] text-outline">${dataQualityNotes.map(note => `<li>${escHtml(note)}</li>`).join('')}</ul>`
+      : `<p class="text-[13px] text-outline">${locale === 'tr' ? 'Ek veri kalitesi notu yok.' : 'No extra data quality notes.'}</p>`;
+
+    root.innerHTML = `
+      <section class="grid grid-cols-2 gap-3">
+        ${snapshotCards.map(card => `
+          <div class="rounded-lg border border-[#d9e2ec] bg-white p-3">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${escHtml(card.label)}</p>
+            <p class="mt-2 text-[18px] font-semibold text-primary">${escHtml(String(card.value))}</p>
+          </div>`).join('')}
+      </section>
+
+      <section class="rounded-xl border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${locale === 'tr' ? 'Belediye Odağı' : 'Municipal Focus'}</p>
+        <div class="mt-3">${focusHtml}</div>
+      </section>
+
+      <section class="rounded-xl border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${locale === 'tr' ? 'Öncelikli İlçeler' : 'Priority Districts'}</p>
+        <div class="mt-3 grid gap-3">${priorityHtml}</div>
+      </section>
+
+      <section class="rounded-xl border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${locale === 'tr' ? 'İlçe Yorumları' : 'District Commentary'}</p>
+        <div class="mt-3 grid gap-3">${commentaryHtml}</div>
+      </section>
+
+      <section class="rounded-xl border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${locale === 'tr' ? 'Stratejik Öneriler' : 'Strategic Recommendations'}</p>
+        <div class="mt-3 grid gap-3">${recommendationsHtml}</div>
+      </section>
+
+      <section class="rounded-xl border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">${locale === 'tr' ? 'Veri Kalitesi Notları' : 'Data Quality Notes'}</p>
+        <div class="mt-3">${notesHtml}</div>
+      </section>`;
+  }
+
   // ── Session ────────────────────────────────────────────────────────────────
   async function newSession() {
     const sessionId = currentSessionId();
@@ -798,6 +976,7 @@
     renderAttachPreview();
     closeFormulaResolver();
     closeMethodologyResolver();
+    closeDetectedMetricsResolver();
     closePanel();
     document.getElementById('open-panel-btn').classList.add('hidden');
     setStatus('empty', 'No files uploaded');
@@ -998,6 +1177,7 @@
       methodology_resolution: {},
       factor_conflicts: [],
       formula_conflicts: [],
+      detected_metrics: [],
       calculation_audit: {},
     };
     applySessionDiagnostics();
@@ -1008,6 +1188,7 @@
     const titleEl = document.getElementById('session-alert-title');
     const bodyEl = document.getElementById('session-alert-body');
     const actionEl = document.getElementById('session-alert-action');
+    const reviewMetricsBtn = document.getElementById('review-metrics-btn');
 
     if (sessionDiagnostics.report_generation_status === 'blocked_methodology_conflict') {
       titleEl.textContent = 'Methodology conflict detected';
@@ -1035,6 +1216,11 @@
       actionEl.textContent = 'Upload Data';
       actionEl.onclick = openSupportingDataPicker;
     }
+
+    const metricCount = (sessionDiagnostics.detected_metrics || []).length;
+    reviewMetricsBtn.disabled = metricCount === 0;
+    reviewMetricsBtn.classList.toggle('opacity-40', metricCount === 0);
+    reviewMetricsBtn.classList.toggle('cursor-not-allowed', metricCount === 0);
 
     updateGenerateButtonState();
     renderAuditPanel(sessionDiagnostics.calculation_audit || (reportData && reportData.audit) || {});
@@ -1084,6 +1270,15 @@
 
   function closeMethodologyResolver() {
     document.getElementById('methodology-resolver-modal').classList.add('hidden');
+  }
+
+  function openDetectedMetricsResolver() {
+    renderDetectedMetricsResolver();
+    document.getElementById('detected-metrics-modal').classList.remove('hidden');
+  }
+
+  function closeDetectedMetricsResolver() {
+    document.getElementById('detected-metrics-modal').classList.add('hidden');
   }
 
   function openFormulaResolver() {
@@ -1262,6 +1457,118 @@
     }
   }
 
+  function renderDetectedMetricsResolver() {
+    const body = document.getElementById('detected-metrics-body');
+    const metrics = sessionDiagnostics.detected_metrics || [];
+
+    if (!metrics.length) {
+      body.innerHTML = '<p class="text-[13px] text-outline">No metrics have been detected yet.</p>';
+      return;
+    }
+
+    const categoryOptions = ['energy', 'water', 'waste', 'mobility', 'ecology', 'resilience', 'climate', 'other'];
+    const roleOptions = ['emission_input', 'resource_kpi', 'offset_or_sink', 'context_indicator'];
+    const sectionOptions = ['Emissions Overview', 'Water Overview', 'Resource Overview', 'District Context and Sustainability Signals'];
+
+    body.innerHTML = metrics.map(metric => {
+      const metricKey = metric.metric_key;
+      const categories = categoryOptions.map(option => `<option value="${escHtml(option)}" ${metric.category === option ? 'selected' : ''}>${escHtml(option)}</option>`).join('');
+      const roles = roleOptions.map(option => `<option value="${escHtml(option)}" ${metric.role === option ? 'selected' : ''}>${escHtml(option)}</option>`).join('');
+      const sections = sectionOptions.map(option => `<option value="${escHtml(option)}" ${metric.report_section === option ? 'selected' : ''}>${escHtml(option)}</option>`).join('');
+      const sustainability = metric.sustainability_related ? 'true' : 'false';
+      const docs = (metric.documents || []).join(', ') || 'Unknown source';
+      const badges = [
+        metric.is_known_metric ? 'Core metric' : 'Custom metric',
+        metric.sustainability_related ? 'Narrative/report' : 'Ignored by report',
+        metric.used_in_calculation ? 'Used in calculation' : 'Not in calculation',
+      ].map(item => `<span class="rounded-full bg-[#eef5f9] px-2 py-1 text-[10px] font-semibold text-primary">${escHtml(item)}</span>`).join('');
+      return `
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4 mb-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-[14px] font-semibold text-primary">${escHtml(metric.display_name || metricKey)}</p>
+              <p class="mt-1 text-[12px] leading-5 text-outline">Key: <span class="font-mono">${escHtml(metricKey)}</span> · Source: ${escHtml(docs)}</p>
+              <div class="mt-2 flex flex-wrap gap-2">${badges}</div>
+            </div>
+            <div class="grid min-w-[280px] flex-1 gap-3 md:grid-cols-2">
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Display name</label>
+                <input id="metric-display-${escHtml(metricKey)}" value="${escHtml(metric.display_name || metricKey)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface"/>
+              </div>
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Unit</label>
+                <input id="metric-unit-${escHtml(metricKey)}" value="${escHtml(metric.unit || '')}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface"/>
+              </div>
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Sustainability relevance</label>
+                <select id="metric-sustainability-${escHtml(metricKey)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">
+                  <option value="true" ${sustainability === 'true' ? 'selected' : ''}>Include in narrative/report</option>
+                  <option value="false" ${sustainability === 'false' ? 'selected' : ''}>Ignore as non-sustainability</option>
+                </select>
+              </div>
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Category</label>
+                <select id="metric-category-${escHtml(metricKey)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">${categories}</select>
+              </div>
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Role</label>
+                <select id="metric-role-${escHtml(metricKey)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">${roles}</select>
+              </div>
+              <div>
+                <label class="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-outline">Report section</label>
+                <select id="metric-section-${escHtml(metricKey)}" class="w-full rounded-lg border border-[#d9e2ec] bg-white px-3 py-2 text-[13px] text-on-surface">${sections}</select>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 grid gap-2 md:grid-cols-4 text-[12px] text-outline">
+            <p><span class="font-semibold text-primary">Source kind:</span> ${escHtml(metric.source_kind || 'unknown')}</p>
+            <p><span class="font-semibold text-primary">Availability:</span> ${escHtml(((metric.numeric_availability || 0) * 100).toFixed(0))}%</p>
+            <p><span class="font-semibold text-primary">District dimension:</span> ${metric.district_dimension ? 'yes' : 'no'}</p>
+            <p><span class="font-semibold text-primary">Time dimension:</span> ${metric.time_dimension ? 'yes' : 'no'}</p>
+          </div>
+        </section>`;
+    }).join('');
+  }
+
+  async function saveDetectedMetrics() {
+    const metrics = sessionDiagnostics.detected_metrics || [];
+    const payload = { metrics: {} };
+    for (const metric of metrics) {
+      const key = metric.metric_key;
+      payload.metrics[key] = {
+        display_name: document.getElementById(`metric-display-${key}`)?.value?.trim() || metric.display_name,
+        unit: document.getElementById(`metric-unit-${key}`)?.value?.trim() || '',
+        sustainability_related: document.getElementById(`metric-sustainability-${key}`)?.value === 'true',
+        category: document.getElementById(`metric-category-${key}`)?.value || metric.category,
+        role: document.getElementById(`metric-role-${key}`)?.value || metric.role,
+        report_section: document.getElementById(`metric-section-${key}`)?.value || metric.report_section,
+      };
+    }
+
+    const saveBtn = document.getElementById('detected-metrics-save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+      const res = await sessionFetch('/detected-metrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to save detected metric changes.');
+      sessionDiagnostics = data;
+      applySessionDiagnostics();
+      closeDetectedMetricsResolver();
+      addAssistantMessage('I saved the detected metric review for this session. The updated classification will be used in chat answers and report generation.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Metric Review';
+    }
+  }
+
   function renderAuditPanel(audit) {
     const root = document.getElementById('tab-content-audit');
     if (!root) return;
@@ -1270,6 +1577,7 @@
     const formula = audit.formula || {};
     const factors = audit.factors || {};
     const methodology = audit.methodology || {};
+    const detectedMetrics = audit.metrics?.detected || sessionDiagnostics.detected_metrics || [];
     const warnings = sessionDiagnostics.report_generation_warnings || [];
 
     const formulaHtml = formula.selected
@@ -1291,6 +1599,13 @@
     const warningHtml = warnings.length
       ? `<ul class="list-disc pl-4 text-[12px] text-[#8a5a00]">${warnings.map(item => `<li>${escHtml(item)}</li>`).join('')}</ul>`
       : '<p class="text-[12px] text-outline">No active warnings.</p>';
+    const metricPreviewRows = detectedMetrics.slice(0, 8).map(metric => `
+      <tr class="border-b border-[#eef2f6]">
+        <td class="py-2 pr-2 font-medium text-primary">${escHtml(metric.display_name || metric.metric_key)}</td>
+        <td class="py-2 pr-2">${escHtml(metric.role || '')}</td>
+        <td class="py-2 pr-2">${escHtml(metric.report_section || '')}</td>
+        <td class="py-2">${metric.sustainability_related ? 'yes' : 'no'}</td>
+      </tr>`).join('');
 
     root.innerHTML = `
       <div class="space-y-4">
@@ -1320,6 +1635,25 @@
         <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">User Inputs</p>
           <pre class="mt-2 overflow-auto rounded-lg bg-white p-3 text-[11px] text-on-surface">${escHtml(JSON.stringify(formula.user_inputs || {}, null, 2))}</pre>
+        </section>
+        <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
+          <div class="flex items-center justify-between gap-3">
+            <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Detected Metrics</p>
+            <button onclick="openDetectedMetricsResolver()" class="rounded-lg border border-[#d9e2ec] px-3 py-1 text-[11px] font-semibold text-primary hover:bg-white transition-colors">Review</button>
+          </div>
+          <div class="mt-3 overflow-hidden rounded-lg border border-[#eef2f6] bg-white">
+            <table class="w-full text-[12px]">
+              <thead class="bg-[#f7fafc] text-outline">
+                <tr>
+                  <th class="px-3 py-2 text-left font-semibold">Metric</th>
+                  <th class="px-3 py-2 text-left font-semibold">Role</th>
+                  <th class="px-3 py-2 text-left font-semibold">Section</th>
+                  <th class="px-3 py-2 text-left font-semibold">Narrative</th>
+                </tr>
+              </thead>
+              <tbody class="px-3">${metricPreviewRows || '<tr><td colspan="4" class="px-3 py-3 text-outline">No detected metrics.</td></tr>'}</tbody>
+            </table>
+          </div>
         </section>
         <section class="rounded-lg border border-[#d9e2ec] bg-[#fbfcfe] p-4">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-outline">Warnings</p>

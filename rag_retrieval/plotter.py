@@ -34,6 +34,7 @@ def generate_report_charts(report_input: ReportInput, output_dir: str | Path) ->
         charts.extend(_stacked_components_chart(plt, metrics, output_path))
     if any(item["water_consumption"] > 0.0 for item in metrics):
         charts.extend(_bar_chart_water_consumption(plt, metrics, output_path))
+    charts.extend(_custom_metric_charts(plt, metrics, output_path))
     return charts
 
 
@@ -51,6 +52,7 @@ def _metrics(report_input: ReportInput) -> list[dict]:
                 "water_consumption": float(data.get("water_consumption") or 0.0),
                 "growth": data.get("growth"),
                 "water_growth": data.get("water_growth"),
+                "metric_summaries": dict(data.get("metric_summaries") or {}),
             }
         )
     return values
@@ -140,3 +142,55 @@ def _bar_chart_water_consumption(plt, metrics: list[dict], output_dir: Path) -> 
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return [{"title": "Water Consumption by District", "path": str(path)}]
+
+
+def _custom_metric_charts(plt, metrics: list[dict], output_dir: Path) -> list[dict[str, str]]:
+    builtins = {"electricity", "natural_gas", "water"}
+    series: dict[str, dict] = {}
+    for item in metrics:
+        district = item["district"]
+        for metric_key, summary in (item.get("metric_summaries") or {}).items():
+            if metric_key in builtins:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0:
+                continue
+            entry = series.setdefault(
+                metric_key,
+                {
+                    "label": summary.get("label") or metric_key.replace("_", " ").title(),
+                    "unit": summary.get("unit") or "",
+                    "values": [],
+                    "report_section": summary.get("report_section") or "District Context and Sustainability Signals",
+                },
+            )
+            entry["values"].append({"district": district, "value": value})
+
+    selected = sorted(
+        [
+            {"metric_key": metric_key, **payload}
+            for metric_key, payload in series.items()
+            if len(payload["values"]) >= 2
+        ],
+        key=lambda item: max(value["value"] for value in item["values"]),
+        reverse=True,
+    )[:2]
+
+    charts: list[dict[str, str]] = []
+    for item in selected:
+        values = sorted(item["values"], key=lambda entry: entry["value"], reverse=True)[:12]
+        fig, ax = plt.subplots(figsize=(11, 6))
+        ax.barh([entry["district"] for entry in values], [entry["value"] for entry in values], color="#4f772d")
+        ax.invert_yaxis()
+        unit_suffix = f" ({item['unit']})" if item["unit"] else ""
+        title = f"{item['label']} by District"
+        ax.set_title(title)
+        ax.set_xlabel(f"{item['label']}{unit_suffix}")
+        ax.grid(axis="x", linestyle=":", alpha=0.35)
+        fig.tight_layout()
+        filename = f"{item['metric_key']}_by_district.png"
+        path = output_dir / filename
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        charts.append({"title": title, "path": str(path)})
+    return charts

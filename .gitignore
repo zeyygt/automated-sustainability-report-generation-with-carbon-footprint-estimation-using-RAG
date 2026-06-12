@@ -7,3 +7,5 @@ build/
 *.egg-info/
 .pytest_cache/
 outputs/
+tmp_live_debug/
+tmp_phase3_debug/

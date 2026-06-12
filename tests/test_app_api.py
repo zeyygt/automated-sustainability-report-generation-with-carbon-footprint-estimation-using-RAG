@@ -48,6 +48,10 @@ class AppApiTests(unittest.TestCase):
         response = self.client.post("/upload", headers={SESSION_ID_HEADER: session_id}, files=files)
         self.assertEqual(response.status_code, 200, response.text)
 
+    @staticmethod
+    def _write_csv(path: Path, lines: list[str]) -> None:
+        path.write_text("\n".join(lines), encoding="utf-8")
+
     def test_sessions_are_isolated(self):
         session_a = self._create_session()
         session_b = self._create_session()
@@ -173,7 +177,115 @@ class AppApiTests(unittest.TestCase):
                 json={"title": "Resolved", "language": "English"},
             )
             self.assertEqual(report.status_code, 200, report.text)
-            self.assertEqual(len(report.json()["metrics"]), 39)
+            report_payload = report.json()
+            self.assertEqual(len(report_payload["metrics"]), 39)
+            self.assertIn("insights", report_payload)
+            self.assertIn("municipality", report_payload["insights"])
+            self.assertIn("recommendations", report_payload)
+            self.assertIn("priority_district_commentary", report_payload["recommendations"])
+
+    def test_detected_metrics_are_exposed_and_can_be_reclassified(self):
+        session_id = self._create_session()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset = tmp_path / "generic_metrics.csv"
+            self._write_csv(
+                dataset,
+                [
+                    "District,Year,Water Consumption (m3),Tree Count,Dam Occupancy (%)",
+                    "Kadikoy,2023,1000,42000,68",
+                    "Kadikoy,2024,1100,45000,72",
+                ],
+            )
+            self._upload_paths(session_id, [dataset])
+
+        diagnostics = self.client.get("/emission-factors", headers={SESSION_ID_HEADER: session_id})
+        self.assertEqual(diagnostics.status_code, 200)
+        payload = diagnostics.json()
+        detected = {item["metric_key"]: item for item in payload["detected_metrics"]}
+        self.assertIn("tree_count", detected)
+        self.assertIn("dam_occupancy", detected)
+        self.assertTrue(detected["tree_count"]["sustainability_related"])
+
+        updated = self.client.post(
+            "/detected-metrics",
+            headers={SESSION_ID_HEADER: session_id},
+            json={
+                "metrics": {
+                    "tree_count": {
+                        "sustainability_related": False,
+                        "category": "other",
+                        "role": "context_indicator",
+                        "report_section": "District Context and Sustainability Signals",
+                    }
+                }
+            },
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        updated_payload = updated.json()
+        tree_metric = next(item for item in updated_payload["detected_metrics"] if item["metric_key"] == "tree_count")
+        self.assertFalse(tree_metric["sustainability_related"])
+        self.assertEqual(tree_metric["classification_source"], "user")
+
+    def test_new_upload_invalidates_previous_report_artifacts(self):
+        session_id = self._create_session()
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            self._upload_paths(session_id, [ROOT / "test_ibb_39_districts.xlsx"])
+
+            generated = self.client.post(
+                "/generate-report",
+                headers={SESSION_ID_HEADER: session_id},
+                json={"title": "First", "language": "English"},
+            )
+            self.assertEqual(generated.status_code, 200, generated.text)
+
+            report_pdf = self.client.get("/report/pdf", headers={SESSION_ID_HEADER: session_id})
+            self.assertEqual(report_pdf.status_code, 200)
+
+            self._upload_paths(session_id, [ROOT / "test_factor_override_methodology.pdf"])
+
+            stale_report_pdf = self.client.get("/report/pdf", headers={SESSION_ID_HEADER: session_id})
+            self.assertEqual(stale_report_pdf.status_code, 404)
+
+    def test_llm_metric_override_cannot_move_tree_count_out_of_context_section(self):
+        session_id = self._create_session()
+
+        with patch("rag_retrieval.session.suggest_metric_overrides") as suggest_overrides, patch.dict(
+            os.environ, {"OPENAI_API_KEY": "", "ENABLE_LLM_METRIC_INTERPRETATION": "true"}, clear=False
+        ):
+            suggest_overrides.return_value = {
+                "tree_count": {
+                    "metric_key": "tree_count",
+                    "display_name": "Tree Count",
+                    "category": "environmental",
+                    "role": "offset_or_sink",
+                    "report_section": "Resource Overview",
+                    "sustainability_related": True,
+                    "classification_source": "llm",
+                }
+            }
+            self._upload_paths(session_id, [ROOT / "test_ibb_39_districts.xlsx"])
+
+            diagnostics = self.client.get("/emission-factors", headers={SESSION_ID_HEADER: session_id})
+            self.assertEqual(diagnostics.status_code, 200)
+            detected_tree = next(
+                item for item in diagnostics.json()["detected_metrics"] if item["metric_key"] == "tree_count"
+            )
+            self.assertEqual(detected_tree["report_section"], "District Context and Sustainability Signals")
+            self.assertEqual(detected_tree["role"], "context_indicator")
+            self.assertEqual(detected_tree["classification_source"], "heuristic")
+
+            report = self.client.post(
+                "/generate-report",
+                headers={SESSION_ID_HEADER: session_id},
+                json={"title": "Tree Context", "language": "English"},
+            )
+            self.assertEqual(report.status_code, 200, report.text)
+            markdown = report.json()["markdown"]
+            self.assertIn("# District Context and Sustainability Signals", markdown)
+            self.assertIn("Tree Count", markdown)
 
 
 if __name__ == "__main__":

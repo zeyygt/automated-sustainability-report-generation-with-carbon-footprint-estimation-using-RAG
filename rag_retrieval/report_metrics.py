@@ -7,7 +7,6 @@ from .text import normalize_for_search
 
 
 def public_metrics(structured_results: list[dict]) -> list[dict]:
-    registry = metric_registry()
     grouped: dict[str, dict] = {}
 
     for item in structured_results:
@@ -43,10 +42,14 @@ def public_metrics(structured_results: list[dict]) -> list[dict]:
         _merge_optional_numeric(current, data, "growth")
         current["warnings"] = sorted(set([*current.get("warnings", []), *(data.get("warnings", []) or [])]))
 
-        for metric_key, definition in registry.items():
-            metric_data = (data.get("metrics") or {}).get(metric_key)
-            if metric_data is None:
-                metric_data = _legacy_metric_summary(metric_key, definition, data)
+        all_metrics = dict(data.get("metrics") or {})
+        for metric_key, definition in metric_registry().items():
+            if metric_key not in all_metrics:
+                legacy_metric = _legacy_metric_summary(metric_key, definition, data)
+                if legacy_metric is not None:
+                    all_metrics[metric_key] = legacy_metric
+
+        for metric_key, metric_data in all_metrics.items():
             if metric_data is None:
                 continue
             current_summary = current["metric_summaries"].get(metric_key)
@@ -110,8 +113,8 @@ def _legacy_metric_summary(metric_key: str, definition, data: dict) -> dict | No
 
 def _merge_metric_summary(current: dict | None, candidate: dict) -> dict:
     merged = dict(current or {})
-    for key in ("metric_key", "label", "category", "unit", "role", "report_section", "source_column"):
-        if candidate.get(key):
+    for key in ("metric_key", "label", "category", "unit", "role", "report_section", "source_column", "sustainability_related", "is_known_metric", "source_kind"):
+        if key in candidate and candidate.get(key) not in (None, ""):
             merged[key] = candidate.get(key)
 
     current_value = float(merged.get("value") or 0.0)
@@ -130,12 +133,24 @@ def _merge_metric_summary(current: dict | None, candidate: dict) -> dict:
     return merged
 
 
-def _sort_key(item: dict) -> float:
+def _sort_key(item: dict) -> tuple[float, ...]:
     total_emission = float(item.get("total_emission") or 0.0)
     water = float(item.get("water_consumption") or 0.0)
     gas = float(item.get("gas_emission") or 0.0)
     electricity = float(item.get("electricity_emission") or 0.0)
-    return max(total_emission, water, gas, electricity)
+    custom_values = [
+        float(summary.get("value") or 0.0)
+        for metric_key, summary in (item.get("metric_summaries") or {}).items()
+        if metric_key not in {"electricity", "natural_gas", "water"}
+    ]
+    max_custom = max(custom_values, default=0.0)
+    return (
+        1 if total_emission > 0.0 else 0,
+        total_emission,
+        water,
+        gas + electricity,
+        max_custom,
+    )
 
 
 def _growth_percent(value) -> float | None:

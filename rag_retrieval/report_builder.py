@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
+from .insight_engine import build_report_insights
 from .pipeline import handle_query
+from .recommendation_engine import build_report_recommendations
+from .report_metrics import public_metrics
 from .report_models import ReportInput
 from .session import RetrievalSession
 
@@ -53,6 +56,13 @@ def build_report_input(
         ]
         if _report_warning(warning)
     )
+    metrics = public_metrics(structured_results)
+    insights = build_report_insights(
+        metrics,
+        warnings=warnings,
+        detected_metrics=list(getattr(session, "detected_metrics", []) or []),
+    )
+    recommendations = build_report_recommendations(metrics, insights, warnings=warnings)
 
     return ReportInput(
         title=title,
@@ -60,11 +70,14 @@ def build_report_input(
         session_id=session.session_id,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         documents=_document_summaries(session),
+        detected_metrics=list(getattr(session, "detected_metrics", []) or []),
         query_results=query_results,
         structured_results=structured_results,
         retrieval_context=retrieval_context,
         sources=sources,
         warnings=warnings,
+        insights=insights,
+        recommendations=recommendations,
     )
 
 
@@ -104,6 +117,10 @@ def _detected_columns(engine) -> dict:
         "unit": engine.unit_column,
         "time": engine.time_column,
         "metrics": dict(getattr(engine, "metric_columns", {}) or {}),
+        "detected_metrics": {
+            metric_key: metric.to_dict()
+            for metric_key, metric in dict(getattr(engine, "discovered_metrics", {}) or {}).items()
+        },
     }
 
 

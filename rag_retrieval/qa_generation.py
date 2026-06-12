@@ -46,6 +46,17 @@ def build_answer_contexts(query_result: dict, max_retrieval: int = 5, max_struct
             parts.append(f"per_household={data['per_household']:,.2f}")
         if data.get("growth") is not None:
             parts.append(f"growth={float(data['growth']) * 100:.2f}%")
+        extra_metrics = []
+        for metric_key, summary in sorted((data.get("metrics") or {}).items()):
+            if metric_key in {"electricity", "natural_gas", "water"}:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0 or not summary.get("sustainability_related", True):
+                continue
+            unit = str(summary.get("unit") or "").strip()
+            extra_metrics.append(f"{metric_key}={value:,.2f}{(' ' + unit) if unit else ''}")
+        if extra_metrics:
+            parts.append("additional_metrics=" + "; ".join(extra_metrics[:4]))
         contexts.append(", ".join(parts))
 
     return contexts

@@ -44,6 +44,19 @@ class AcceptanceFlowTests(unittest.TestCase):
         csv_path.write_text("\n".join(rows), encoding="utf-8")
         return csv_path
 
+    @staticmethod
+    def _generic_metric_dataset_csv(tmp_path: Path) -> Path:
+        csv_path = tmp_path / "generic_sustainability_metrics.csv"
+        rows = [
+            "District,Year,Water Consumption (m3),Tree Count,Dam Occupancy (%),Recycling Rate (%)",
+            "Kadikoy,2023,1000,42000,68,34",
+            "Kadikoy,2024,1100,45000,72,37",
+            "Besiktas,2023,700,17000,55,29",
+            "Besiktas,2024,750,18000,58,31",
+        ]
+        csv_path.write_text("\n".join(rows), encoding="utf-8")
+        return csv_path
+
     def test_factor_override_flow_supports_39_district_dataset_and_alias_query(self):
         session = self._build_session(
             [
@@ -65,6 +78,19 @@ class AcceptanceFlowTests(unittest.TestCase):
         query_result = handle_query("Küçük Çekmece electricity emissions", session)
         self.assertTrue(query_result["structured_results"])
         self.assertEqual(query_result["structured_results"][0]["data"]["district"], "Kucukcekmece")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            report = generate_sustainability_report(
+                session,
+                title="Acceptance Flow Report",
+                language="English",
+                output_dir=tmp,
+            )
+            html = Path(report.html_path).read_text(encoding="utf-8")
+
+        self.assertIn("District Appendix", html)
+        self.assertIn("Adalar", html)
+        self.assertIn("Esenyurt", html)
 
     def test_custom_formula_flow_applies_tree_count_override_on_acceptance_dataset(self):
         formula = ExtractedFormula(
@@ -157,7 +183,38 @@ class AcceptanceFlowTests(unittest.TestCase):
             html = Path(report.html_path).read_text(encoding="utf-8")
 
         self.assertIn("Water Overview", report.ai_content_markdown)
+        self.assertIn("Municipality-Wide Assessment", report.ai_content_markdown)
         self.assertIn("Water Overview", html)
+
+    def test_generic_metric_dataset_surfaces_tree_count_and_dam_occupancy_in_report(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            tmp_path = Path(tmp)
+            dataset = self._generic_metric_dataset_csv(tmp_path)
+            session = self._build_session([dataset])
+
+            detected = {item["metric_key"]: item for item in session.detected_metrics}
+            self.assertIn("tree_count", detected)
+            self.assertIn("dam_occupancy", detected)
+            self.assertTrue(detected["tree_count"]["sustainability_related"])
+            self.assertEqual(detected["dam_occupancy"]["report_section"], "Water Overview")
+
+            engine = self._live_engine(session)
+            result = engine.analyze_district("Kadikoy")
+            self.assertEqual(result["metrics"]["tree_count"]["value"], 87000.0)
+            self.assertEqual(result["metrics"]["dam_occupancy"]["value"], 140.0)
+
+            report = generate_sustainability_report(
+                session,
+                title="Generic Metric Report",
+                language="English",
+                output_dir=tmp_path / "reports",
+            )
+
+        self.assertIn("Municipality-Wide Assessment", report.ai_content_markdown)
+        self.assertIn("District Context and Sustainability Signals", report.ai_content_markdown)
+        self.assertIn("Priority Districts", report.ai_content_markdown)
+        self.assertIn("Tree Count", report.ai_content_markdown)
+        self.assertIn("Dam Occupancy", report.ai_content_markdown)
 
 
 if __name__ == "__main__":

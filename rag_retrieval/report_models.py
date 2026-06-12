@@ -25,6 +25,9 @@ class ReportInput:
     retrieval_context: list[dict[str, Any]]
     sources: list[dict[str, Any]]
     warnings: list[str]
+    detected_metrics: list[dict[str, Any]] = field(default_factory=list)
+    insights: dict[str, Any] = field(default_factory=dict)
+    recommendations: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

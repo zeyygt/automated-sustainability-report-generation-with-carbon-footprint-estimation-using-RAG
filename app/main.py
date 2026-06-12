@@ -61,6 +61,19 @@ class MethodologyResolutionRequest(BaseModel):
     factor_doc_ids: dict[str, str] = {}
 
 
+class MetricOverrideInput(BaseModel):
+    display_name: str | None = None
+    category: str | None = None
+    unit: str | None = None
+    role: str | None = None
+    report_section: str | None = None
+    sustainability_related: bool | None = None
+
+
+class MetricOverrideRequest(BaseModel):
+    metrics: dict[str, MetricOverrideInput]
+
+
 def _session_id_from_request(request: Request) -> str | None:
     return request.headers.get(SESSION_ID_HEADER) or request.query_params.get("session_id")
 
@@ -132,6 +145,7 @@ def _emission_factors_payload(state: AppSessionState) -> dict:
         "methodology_resolution": dict(getattr(session, "methodology_resolution", {}) or {}),
         "factor_conflicts": list(getattr(session, "factor_conflicts", []) or []),
         "formula_conflicts": list(getattr(session, "formula_conflicts", []) or []),
+        "detected_metrics": list(getattr(session, "detected_metrics", []) or []),
         "report_generation_status": getattr(session, "report_generation_status", "ready"),
         "report_generation_warnings": list(getattr(session, "report_generation_warnings", []) or []),
         "calculation_audit": dict(getattr(session, "calculation_audit", {}) or {}),
@@ -219,6 +233,20 @@ async def methodology_resolution(request: Request, payload: MethodologyResolutio
     return _emission_factors_payload(state)
 
 
+@app.post("/detected-metrics")
+async def detected_metrics_resolution(request: Request, payload: MetricOverrideRequest):
+    state = _state_for_request(request)
+    try:
+        serialized = {
+            name: value.model_dump(exclude_none=True)
+            for name, value in payload.metrics.items()
+        }
+        state.retrieval_session.update_metric_overrides(serialized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _emission_factors_payload(state)
+
+
 @app.post("/upload")
 async def upload_files(request: Request, files: list[UploadFile]):
     state = _state_for_request(request)
@@ -238,6 +266,8 @@ async def upload_files(request: Request, files: list[UploadFile]):
 
     stats = await asyncio.to_thread(state.retrieval_session.build_index, saved_paths)
     state.uploaded_files.extend(new_files)
+    state.report = None
+    state.report_markdown = None
 
     return {
         "session_id": state.session_id,
@@ -336,6 +366,9 @@ async def generate_report_endpoint(request: Request, payload: ReportRequest):
         "has_pdf": bool(report.pdf_path and report.pdf_path.exists()),
         "charts": charts,
         "metrics": metrics,
+        "detected_metrics": list(getattr(state.retrieval_session, "detected_metrics", []) or []),
+        "insights": dict(getattr(report.report_input, "insights", {}) or {}),
+        "recommendations": dict(getattr(report.report_input, "recommendations", {}) or {}),
         "audit": dict(getattr(state.retrieval_session, "calculation_audit", {}) or {}),
     }
 
@@ -350,6 +383,7 @@ async def download_html(request: Request):
         report.html_path,
         media_type="text/html",
         filename="sustainability_report.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
@@ -363,6 +397,7 @@ async def download_pdf(request: Request):
         report.pdf_path,
         media_type="application/pdf",
         filename="sustainability_report.pdf",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
@@ -372,7 +407,11 @@ async def get_chart(filename: str, request: Request):
     path = state.temp_dir / "reports" / "charts" / Path(filename).name
     if not path.exists():
         raise HTTPException(status_code=404, detail="Chart not found.")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.delete("/session")

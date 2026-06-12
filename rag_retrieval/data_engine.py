@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .metric_discovery import DiscoveredMetric, discover_metrics
 from .metric_registry import MetricDefinition, metric_registry
 from .text import normalize_for_search, search_tokens
 
@@ -23,7 +24,14 @@ class FormulaBinding:
 class DataEngine:
     """Compute deterministic insights from Excel, PDF table, or extracted fact DataFrames."""
 
-    def __init__(self, dataframe, emission_factors: dict | None = None, custom_formula=None, custom_formula_inputs=None):
+    def __init__(
+        self,
+        dataframe,
+        emission_factors: dict | None = None,
+        custom_formula=None,
+        custom_formula_inputs=None,
+        metric_overrides: dict[str, dict[str, object]] | None = None,
+    ):
         self.pd = _import_pandas()
         self.reference_data = _load_reference_data()
         self.metric_registry = metric_registry()
@@ -36,6 +44,7 @@ class DataEngine:
         }
         self.custom_formula = custom_formula  # ExtractedFormula | None
         self.custom_formula_inputs = dict(custom_formula_inputs or {})
+        self.metric_overrides = dict(metric_overrides or {})
         self.district_population = self.reference_data.get("districts", {})
         self.avg_household_size = self.reference_data.get("avg_household_size")
         self.baseline_year = self.reference_data.get("baseline_year")
@@ -54,6 +63,23 @@ class DataEngine:
         self.water_column = self.metric_columns.get("water")
         self.emissions_column = self._detect_emissions_column()
         self.growth_rate_column = self._detect_growth_rate_column()
+        self.discovered_metrics: dict[str, DiscoveredMetric] = discover_metrics(
+            self.dataframe,
+            registry=self.metric_registry,
+            district_column=self.district_column,
+            time_column=self.time_column,
+            metric_column=self.metric_column,
+            unit_column=self.unit_column,
+            value_column=self.value_column,
+            metric_columns=self.metric_columns,
+            metric_aliases_for_key=self._metric_aliases,
+            metric_overrides=self.metric_overrides,
+        )
+        self.report_metric_definitions: dict[str, DiscoveredMetric] = {
+            metric_key: metric
+            for metric_key, metric in self.discovered_metrics.items()
+            if metric.is_known_metric or metric.sustainability_related
+        }
         self.custom_formula_bindings: dict[str, FormulaBinding] = {}
         self.custom_formula_bound_variables: dict[str, str] = {}
         self.custom_formula_missing_variables: list[str] = []
@@ -87,6 +113,12 @@ class DataEngine:
             and self.electricity_column is None
             and self.emissions_column is None
             and self.metric_column is None
+            and not any(
+                metric_key != "natural_gas" and (
+                    metric.source_column is not None or metric.source_kind == "metric_row"
+                )
+                for metric_key, metric in self.report_metric_definitions.items()
+            )
         ):
             gas = self._sum_column(district_rows, self.value_column)
             metric_summaries.setdefault("natural_gas", {}).update({"value": float(gas)})
@@ -501,12 +533,12 @@ class DataEngine:
 
     def _summarize_known_metrics(self, rows, population: float | None) -> dict[str, dict[str, object]]:
         summaries: dict[str, dict[str, object]] = {}
-        for metric_key, definition in self.metric_registry.items():
+        for metric_key, definition in self.report_metric_definitions.items():
             value = self._metric_total(rows, metric_key)
             growth = self._growth_for_metric(rows, metric_key)
             summaries[metric_key] = {
                 "metric_key": metric_key,
-                "label": metric_key.replace("_", " ").title(),
+                "label": definition.display_name,
                 "category": definition.category,
                 "unit": definition.unit,
                 "role": definition.role,
@@ -514,14 +546,21 @@ class DataEngine:
                 "value": float(value),
                 "per_capita": self._safe_divide(value, population),
                 "growth": growth,
-                "source_column": self.metric_columns.get(metric_key),
+                "source_column": definition.source_column,
+                "sustainability_related": definition.sustainability_related,
+                "is_known_metric": definition.is_known_metric,
+                "source_kind": definition.source_kind,
             }
         return summaries
 
     def _metric_total(self, rows, metric_key: str) -> float:
-        specific_column = self.metric_columns.get(metric_key)
+        definition = self.report_metric_definitions.get(metric_key)
+        if definition is None:
+            return 0.0
+        specific_column = definition.source_column
         value = self._sum_metric_specific_column(rows, metric_key, specific_column)
-        value += self._sum_metric_value(rows, self._metric_aliases(metric_key, include_units=False), specific_column)
+        if definition.source_kind == "metric_row" or (definition.source_kind != "column" and value == 0.0):
+            value += self._sum_metric_value(rows, definition.metric_terms, specific_column)
         return float(value)
 
     def _sum_metric_specific_column(self, rows, metric_key: str, column: str | None) -> float:
@@ -837,11 +876,14 @@ class DataEngine:
         if not self.time_column or self.time_column not in rows.columns:
             return None
 
-        specific_column = self.metric_columns.get(metric_key)
+        definition = self.report_metric_definitions.get(metric_key)
+        if definition is None:
+            return None
+        specific_column = definition.source_column
         if specific_column and specific_column in rows.columns:
             return self._growth_from_series(rows, specific_column)
 
-        metric_rows = self._metric_rows(rows, self._metric_aliases(metric_key, include_units=False))
+        metric_rows = self._metric_rows(rows, definition.metric_terms)
         if metric_rows.empty or not self.value_column or self.value_column not in metric_rows.columns:
             return None
         return self._growth_from_series(metric_rows, self.value_column)

@@ -66,6 +66,7 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
         for chart in report.charts
     )
     metric_rows = "\n".join(_metric_rows(report.report_input.structured_results))
+    additional_metric_rows = "\n".join(_additional_metric_rows(report.report_input.structured_results))
     ibb_logo = _html_logo(assets.ibb_logo_path, "IBB logo")
 
     return f"""<!doctype html>
@@ -111,10 +112,23 @@ def render_html(report: GeneratedReport, assets: ReportAssets) -> str:
   {chart_html}
 
   <section>
+    <h2>District Appendix</h2>
+    <p class="muted">The appendix lists the full district-level indicator table used in this report.</p>
+  </section>
+
+  <section>
     <h2>District-Level Sustainability Indicators</h2>
     <table>
       <tr><th>District</th><th>Total emissions</th><th>Natural gas</th><th>Electricity</th><th>Water</th><th>Direct</th><th>Growth</th></tr>
       {metric_rows}
+    </table>
+  </section>
+
+  <section>
+    <h2>Additional Sustainability Metrics</h2>
+    <table>
+      <tr><th>District</th><th>Metric</th><th>Value</th><th>Role</th><th>Section</th></tr>
+      {additional_metric_rows or '<tr><td colspan="5" class="muted">No additional sustainability metrics were detected.</td></tr>'}
     </table>
   </section>
 </body>
@@ -167,10 +181,23 @@ def render_pdf(report: GeneratedReport, output_path: str | Path, assets: ReportA
             story.append(Spacer(1, 0.3 * cm))
 
     story.append(PageBreak())
-    story.append(Paragraph("District-Level Sustainability Indicators", styles["Heading1"]))
-    metric_table = _metric_table(report.report_input.structured_results, styles, small)
-    if metric_table:
-        story.append(metric_table)
+    story.append(Paragraph("District Appendix", styles["Heading1"]))
+    story.append(Paragraph("The appendix lists the full district-level indicator table used in this report.", styles["Normal"]))
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(Paragraph("District-Level Sustainability Indicators", styles["Heading2"]))
+    metric_tables = _metric_tables(report.report_input.structured_results, small)
+    for index, table in enumerate(metric_tables):
+        if index:
+            story.append(Spacer(1, 0.2 * cm))
+        story.append(table)
+    additional_metric_tables = _additional_metric_tables(report.report_input.structured_results, small)
+    if additional_metric_tables:
+        story.append(Spacer(1, 0.3 * cm))
+        story.append(Paragraph("Additional Sustainability Metrics", styles["Heading2"]))
+        for index, table in enumerate(additional_metric_tables):
+            if index:
+                story.append(Spacer(1, 0.2 * cm))
+            story.append(table)
 
     doc.build(story)
     return Path(output_path)
@@ -197,15 +224,12 @@ def _coverage_notes(report: GeneratedReport) -> list[str]:
     return _public_coverage_notes(report.report_input.warnings, report.language)
 
 
-def _metric_table(structured_results: list[dict], styles, small):
-    from reportlab.lib import colors
-    from reportlab.platypus import Paragraph, Table, TableStyle
-
-    rows = [["District", "Total", "Natural gas", "Electricity", "Water", "Direct", "Growth"]]
-    for data in public_metrics(structured_results)[:22]:
+def _metric_table_rows(structured_results: list[dict]) -> list[list[object]]:
+    rows: list[list[object]] = [["District", "Total", "Natural gas", "Electricity", "Water", "Direct", "Growth"]]
+    for data in public_metrics(structured_results):
         rows.append(
             [
-                Paragraph(str(data.get("district", "")), small),
+                str(data.get("district", "")),
                 _fmt_number(data.get("total_emission")),
                 _fmt_number(data.get("gas_emission")),
                 _fmt_number(data.get("electricity_emission")),
@@ -214,11 +238,98 @@ def _metric_table(structured_results: list[dict], styles, small):
                 _fmt_growth(data.get("growth")),
             ]
         )
+    return rows
+
+
+def _metric_tables(structured_results: list[dict], small):
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table
+
+    rows = _metric_table_rows(structured_results)
     if len(rows) == 1:
-        return None
-    table = Table(rows, repeatRows=1)
-    table.setStyle(_table_style(colors))
-    return table
+        return []
+    header, body = rows[0], rows[1:]
+    tables = []
+    for chunk in _chunk_rows(body, 18):
+        rendered_rows = [header] + [
+            [
+                Paragraph(str(row[0]), small),
+                *row[1:],
+            ]
+            for row in chunk
+        ]
+        table = Table(rendered_rows, repeatRows=1)
+        table.setStyle(_table_style(colors))
+        tables.append(table)
+    return tables
+
+
+def _additional_metric_rows(structured_results: Iterable[dict]) -> list[str]:
+    rows = []
+    for item in public_metrics(list(structured_results)):
+        for metric_key, summary in sorted((item.get("metric_summaries") or {}).items()):
+            if metric_key in {"electricity", "natural_gas", "water"}:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0:
+                continue
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(item.get('district', '')))}</td>"
+                f"<td>{html.escape(str(summary.get('label') or metric_key))}</td>"
+                f"<td>{_fmt_number(value)} {html.escape(str(summary.get('unit') or ''))}</td>"
+                f"<td>{html.escape(str(summary.get('role') or ''))}</td>"
+                f"<td>{html.escape(str(summary.get('report_section') or ''))}</td>"
+                "</tr>"
+            )
+    return rows
+
+
+def _additional_metric_table_rows(structured_results: list[dict]) -> list[list[str]]:
+    rows = [["District", "Metric", "Value", "Role", "Section"]]
+    for item in public_metrics(structured_results):
+        for metric_key, summary in sorted((item.get("metric_summaries") or {}).items()):
+            if metric_key in {"electricity", "natural_gas", "water"}:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0:
+                continue
+            rows.append(
+                [
+                    str(item.get("district", "")),
+                    str(summary.get("label") or metric_key),
+                    f"{_fmt_number(value)} {summary.get('unit') or ''}".strip(),
+                    str(summary.get("role") or ""),
+                    str(summary.get("report_section") or ""),
+                ]
+            )
+    return rows
+
+
+def _additional_metric_tables(structured_results: list[dict], small):
+    from reportlab.lib import colors
+    from reportlab.platypus import Paragraph, Table
+
+    rows = _additional_metric_table_rows(structured_results)
+    if len(rows) == 1:
+        return []
+    header, body = rows[0], rows[1:]
+    tables = []
+    for chunk in _chunk_rows(body, 22):
+        rendered_rows = [header] + [
+            [
+                Paragraph(str(row[0]), small),
+                Paragraph(str(row[1]), small),
+                Paragraph(str(row[2]), small),
+                Paragraph(str(row[3]), small),
+                Paragraph(str(row[4]), small),
+            ]
+            for row in chunk
+        ]
+        table = Table(rendered_rows, repeatRows=1)
+        table.setStyle(_table_style(colors))
+        tables.append(table)
+    return tables
 
 
 def _documents_table(documents: list[dict], styles, small):
@@ -353,6 +464,10 @@ def _table_style(colors):
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7fafc")]),
         ]
     )
+
+
+def _chunk_rows(rows: list[list[object]], chunk_size: int) -> list[list[list[object]]]:
+    return [rows[index:index + chunk_size] for index in range(0, len(rows), chunk_size)]
 
 
 def _html_logo(path: Path | None, alt: str) -> str:

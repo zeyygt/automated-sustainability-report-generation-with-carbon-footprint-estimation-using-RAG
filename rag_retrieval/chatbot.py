@@ -90,6 +90,17 @@ def stream_chat_response(
             parts.append(f"water_growth={float(data['water_growth']) * 100:.1f}%")
         if data.get("growth") is not None:
             parts.append(f"growth={float(data['growth']) * 100:.1f}%")
+        extra_metrics = []
+        for metric_key, summary in sorted((data.get("metrics") or {}).items()):
+            if metric_key in {"electricity", "natural_gas", "water"}:
+                continue
+            value = float(summary.get("value") or 0.0)
+            if value <= 0.0 or not summary.get("sustainability_related", True):
+                continue
+            unit = str(summary.get("unit") or "").strip()
+            extra_metrics.append(f"{metric_key}={value:,.2f}{(' ' + unit) if unit else ''}")
+        if extra_metrics:
+            parts.append("additional_metrics=" + "; ".join(extra_metrics[:4]))
         factors_used = data.get("emission_factors_used") or {}
         factors_src = data.get("emission_factors_source") or {}
         if factors_used:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -17,6 +18,8 @@ from .formula_extractor import FormulaExtractor
 from .llm_formula_extractor import LLMFormulaExtractor
 from .index import BM25Index, InMemoryVectorIndex
 from .ingestion import DocumentIngestor
+from .metric_discovery import merge_metric_overrides, normalize_metric_override, summarize_metric_for_api
+from .metric_interpreter import suggest_metric_overrides
 from .models import BuildStats, Chunk, ParsedDocument, RetrievalHit
 from .parsing import DocumentParser, RuntimeDocumentParser
 from .retrieval import RetrievalPipeline
@@ -68,6 +71,9 @@ class RetrievalSession:
         self.methodology_resolution: dict[str, object] = {"formula_doc_id": None, "factor_doc_ids": {}}
         self.methodology_status: str = "clear"
         self.methodology_warnings: list[str] = []
+        self.metric_user_overrides: dict[str, dict[str, object]] = {}
+        self.metric_system_overrides: dict[str, dict[str, object]] = {}
+        self.detected_metrics: list[dict[str, object]] = []
         self.calculation_audit: dict[str, object] = {}
         self.has_structured_data: bool = False
         self.structured_document_count: int = 0
@@ -139,6 +145,10 @@ class RetrievalSession:
 
         # Pass 2: create or refresh DataEngines for every document in the session.
         self._rebuild_data_engines()
+        self._summarize_detected_metrics()
+        if self._refresh_metric_interpretations():
+            self._rebuild_data_engines()
+            self._summarize_detected_metrics()
         for chunk in chunks:
             self.chunks[chunk.chunk_id] = chunk
         self._summarize_formula_validation()
@@ -185,6 +195,9 @@ class RetrievalSession:
         self.methodology_resolution = {"formula_doc_id": None, "factor_doc_ids": {}}
         self.methodology_status = "clear"
         self.methodology_warnings.clear()
+        self.metric_user_overrides.clear()
+        self.metric_system_overrides.clear()
+        self.detected_metrics = []
         self.calculation_audit = {}
         self.has_structured_data = False
         self.structured_document_count = 0
@@ -218,6 +231,7 @@ class RetrievalSession:
 
         self.custom_formula_user_inputs.update(cleaned)
         self._rebuild_data_engines()
+        self._summarize_detected_metrics()
         self._summarize_formula_validation()
         self._summarize_formula_input_columns()
         self._summarize_report_readiness()
@@ -246,6 +260,25 @@ class RetrievalSession:
 
         self._resolve_active_methodology()
         self._rebuild_data_engines()
+        self._summarize_detected_metrics()
+        self._summarize_formula_validation()
+        self._summarize_formula_input_columns()
+        self._summarize_report_readiness()
+        self._summarize_calculation_audit()
+
+    def update_metric_overrides(self, metrics: dict[str, dict[str, object]]) -> None:
+        cleaned: dict[str, dict[str, object]] = {}
+        for metric_key, payload in (metrics or {}).items():
+            key = str(metric_key).strip()
+            if not key:
+                continue
+            normalized = normalize_metric_override(key, payload or {})
+            normalized["classification_source"] = "user"
+            cleaned[key] = normalized
+
+        self.metric_user_overrides = merge_metric_overrides(self.metric_user_overrides, cleaned)
+        self._rebuild_data_engines()
+        self._summarize_detected_metrics()
         self._summarize_formula_validation()
         self._summarize_formula_input_columns()
         self._summarize_report_readiness()
@@ -292,6 +325,7 @@ class RetrievalSession:
 
     def _rebuild_data_engines(self) -> None:
         session_factors = self._session_emission_factors()
+        metric_overrides = self._effective_metric_overrides()
         for doc_id in self.documents:
             try:
                 dataframe = combine_dataframes(
@@ -307,12 +341,72 @@ class RetrievalSession:
                     emission_factors=session_factors or None,
                     custom_formula=self.custom_formula,
                     custom_formula_inputs=self.custom_formula_user_inputs,
+                    metric_overrides=metric_overrides,
                 )
             else:
                 self.data_engines[doc_id] = None
 
     def _session_emission_factors(self) -> dict[str, float]:
         return self._active_factor_overrides()
+
+    def _effective_metric_overrides(self) -> dict[str, dict[str, object]]:
+        return merge_metric_overrides(self.metric_system_overrides, self.metric_user_overrides)
+
+    def _refresh_metric_interpretations(self) -> bool:
+        enabled = str(os.getenv("ENABLE_LLM_METRIC_INTERPRETATION", "")).strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            if self.metric_system_overrides:
+                self.metric_system_overrides = {}
+                return True
+            return False
+        try:
+            suggestions = suggest_metric_overrides(self.detected_metrics)
+        except Exception:
+            suggestions = {}
+        suggestions = self._sanitize_metric_interpretations(suggestions)
+        changed = suggestions != self.metric_system_overrides
+        if not changed:
+            return False
+        self.metric_system_overrides = suggestions
+        return True
+
+    def _sanitize_metric_interpretations(
+        self,
+        suggestions: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        current_metrics = {
+            str(item.get("metric_key")): item
+            for item in (self.detected_metrics or [])
+            if item.get("metric_key")
+        }
+        sanitized: dict[str, dict[str, object]] = {}
+        for metric_key, override in (suggestions or {}).items():
+            current = current_metrics.get(metric_key)
+            if current is None:
+                sanitized[metric_key] = override
+                continue
+
+            # Preserve strong deterministic classifications for already-recognized
+            # sustainability metrics such as tree_count, dam_occupancy, recycling_rate,
+            # and similar context/resource indicators. LLM suggestions remain useful for
+            # ambiguous "other" metrics but should not silently move a known signal into
+            # the wrong section of the report.
+            has_strong_deterministic_classification = (
+                current.get("classification_source") in {"heuristic", "registry"}
+                and bool(current.get("sustainability_related"))
+                and str(current.get("category") or "").strip().lower() not in {"", "other", "climate"}
+            )
+            if has_strong_deterministic_classification:
+                preserved = dict(override or {})
+                preserved["category"] = current.get("category")
+                preserved["role"] = current.get("role")
+                preserved["report_section"] = current.get("report_section")
+                preserved["sustainability_related"] = current.get("sustainability_related")
+                preserved["classification_source"] = current.get("classification_source")
+                sanitized[metric_key] = preserved
+            else:
+                sanitized[metric_key] = override
+        return sanitized
 
     def _summarize_formula_input_columns(self) -> None:
         columns: dict[str, dict[str, object]] = {}
@@ -556,7 +650,63 @@ class RetrievalSession:
                 "status": self.report_generation_status,
                 "warnings": list(self.report_generation_warnings),
             },
+            "metrics": {
+                "detected": list(self.detected_metrics),
+                "user_overrides": dict(self.metric_user_overrides),
+            },
         }
+
+    def _summarize_detected_metrics(self) -> None:
+        combined: dict[str, dict[str, object]] = {}
+        effective_overrides = self._effective_metric_overrides()
+
+        for doc_id, engine in self.data_engines.items():
+            if engine is None:
+                continue
+            document = self.documents.get(doc_id)
+            filename = document.filename if document else doc_id
+            bound_variables = dict(getattr(engine, "custom_formula_bound_variables", {}) or {})
+            for metric_key, metric in dict(getattr(engine, "discovered_metrics", {}) or {}).items():
+                current = combined.setdefault(
+                    metric_key,
+                    {
+                        "metric": metric,
+                        "documents": set(),
+                        "used_in_calculation": False,
+                    },
+                )
+                current["documents"].add(filename)
+                if metric.numeric_availability > current["metric"].numeric_availability:
+                    current["metric"] = metric
+                bound_to_metric_column = metric.source_column and any(
+                    label == f"column:{metric.source_column}"
+                    for label in bound_variables.values()
+                )
+                if metric_key in {"electricity", "natural_gas"} or metric_key in bound_variables or bound_to_metric_column:
+                    current["used_in_calculation"] = True
+
+        detected = []
+        for metric_key, payload in combined.items():
+            metric = payload["metric"]
+            override = effective_overrides.get(metric_key, {})
+            classification_source = override.get("classification_source", metric.classification_source)
+            metric_payload = summarize_metric_for_api(
+                metric,
+                documents=sorted(payload["documents"]),
+                used_in_calculation=bool(payload["used_in_calculation"]),
+                used_in_narrative=bool(metric.sustainability_related),
+            )
+            metric_payload["classification_source"] = classification_source
+            detected.append(metric_payload)
+
+        self.detected_metrics = sorted(
+            detected,
+            key=lambda item: (
+                not bool(item.get("is_known_metric")),
+                not bool(item.get("sustainability_related")),
+                str(item.get("display_name") or item.get("metric_key") or "").casefold(),
+            ),
+        )
 
     def _selected_factor_audit_entries(self) -> dict[str, dict[str, object]]:
         reference_factors = _load_reference_data().get("emission_factors", {})

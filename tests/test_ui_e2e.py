@@ -104,6 +104,10 @@ class UiE2ETests(unittest.TestCase):
         self.page.locator("#generate-btn").click()
         self.page.get_by_text("39 districts analysed", exact=False).wait_for(timeout=120000)
 
+        self.page.locator("#tab-insights").click()
+        self.page.locator("#tab-content-insights").get_by_text("Strategic Recommendations", exact=False).wait_for(timeout=10000)
+        self.page.locator("#tab-content-insights").get_by_text("District Commentary", exact=False).wait_for(timeout=10000)
+
         self.page.locator("#tab-audit").click()
         self.page.get_by_text("0.45", exact=False).wait_for(timeout=10000)
         self.page.get_by_text("2.04", exact=False).wait_for(timeout=10000)
@@ -169,6 +173,29 @@ class UiE2ETests(unittest.TestCase):
             self.page.get_by_text("I saved the methodology resolution", exact=False).wait_for(timeout=10000)
 
             self.assertEqual(self.page.locator("#generate-text").text_content().strip(), "Generate Report")
+
+    def test_detected_metrics_modal_allows_metric_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "generic_metrics.csv"
+            dataset.write_text(
+                "\n".join(
+                    [
+                        "District,Year,Water Consumption (m3),Tree Count,Dam Occupancy (%)",
+                        "Kadikoy,2023,1000,42000,68",
+                        "Kadikoy,2024,1100,45000,72",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self._upload(dataset)
+            self.page.get_by_text("I've indexed", exact=False).wait_for(timeout=30000)
+            self.page.locator("#review-metrics-btn").click()
+            self.page.locator("#detected-metrics-modal").wait_for(state="visible", timeout=10000)
+            self.page.get_by_text("Tree Count", exact=False).wait_for(timeout=10000)
+            self.page.locator("#metric-sustainability-tree_count").select_option("false")
+            self.page.locator("#detected-metrics-save").click()
+            self.page.get_by_text("I saved the detected metric review", exact=False).wait_for(timeout=10000)
 
 
 if __name__ == "__main__":
